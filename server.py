@@ -24,7 +24,7 @@ ADMIN_IDS = [7421386195]
 DATABASE_URL = "postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require'"
 
 # ССЫЛКА НА ВАШ GITHUB PAGES (ФРОНТЕНД)
-FRONTEND_URL = "https://google.com"
+FRONTEND_URL = "https://matveymak22.github.io/Cas"
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 bot = Bot(token=BOT_TOKEN)
@@ -217,4 +217,5 @@ if __name__ == "__main__":
     import uvicorn
     # Render требует слушать порт, который он передает в $PORT, или по умолчанию 10000
     # Но для локального теста оставим 8000. В Render в настройках укажем команду запуска.
+
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
