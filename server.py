@@ -16,7 +16,7 @@ import asyncpg
 # === НАСТРОЙКИ ===
 BOT_TOKEN = "7543820227:AAGY4q-Y2Z7J7X-X9q9Y4q-Y2Z7J7X-X9q9" # ТВОЙ ТОКЕН
 ADMIN_IDS = [776092053] # ТВОЙ ID
-DATABASE_URL = "postgres://neondb_owner:npg_6qJ7lCjXzZ5A@ep-shy-mode-a2267895-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=require" # ТВОЯ БАЗА
+DATABASE_URL = "postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require'" # ТВОЯ БАЗА
 FRONTEND_URL = "https://matveymak22.github.io/Cas" # ТВОЙ САЙТ
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
@@ -161,3 +161,4 @@ async def start(msg: types.Message):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+
