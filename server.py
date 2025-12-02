@@ -18,9 +18,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Читаем переменные
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
-FRONTEND_URL = os.getenv("FRONTEND_URL")
+BOT_TOKEN = os.getenv("8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE")
+DATABASE_URL = os.getenv("postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
+FRONTEND_URL = os.getenv("https://matveymak22.github.io/Cas")
 
 # Проверка токена при старте (чтобы видеть в логах Render)
 if not BOT_TOKEN:
@@ -331,3 +331,4 @@ async def api_history(request: Request):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=10000)
+
