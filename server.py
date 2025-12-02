@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # --- CONFIGURATION ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7543820227:AAGY4q-Y2Z7J7X-X9q9Y4q-Y2Z7J7X-X9q9")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://matveymak22.github.io/Cas")
 # ID админов через запятую
@@ -381,4 +381,5 @@ async def update_balance_game(res: GameResult, request: Request):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
