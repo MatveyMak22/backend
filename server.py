@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Royal Bet - Telegram Mini App Backend
-Complete Version with Telegram Bot
+Complete PostgreSQL Version
 """
 
 import os
@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 # Database imports
+import asyncpg
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import Column, Integer, String, Numeric, DateTime, Boolean, Text, JSON
@@ -38,9 +39,10 @@ from aiogram.utils.markdown import hbold
 # ============================
 
 # IMPORTANT: Set these values!
-BOT_TOKEN = "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE"  # Your bot token
+BOT_TOKEN = "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE"
+# Your Neon.tech connection string
 DATABASE_URL = "postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-FRONTEND_URL = "https://matveymak22.github.io/Cas"  # Your GitHub Pages URL
+FRONTEND_URL = "https://matveymak22.github.io/Cas"
 
 # Настройка логирования
 logging.basicConfig(
@@ -48,14 +50,6 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
-
-# ============================
-# TELEGRAM BOT SETUP
-# ============================
-
-# Initialize bot and dispatcher
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
 
 # ============================
 # DATABASE SETUP
@@ -135,10 +129,9 @@ async def init_database():
             pool_pre_ping=True
         )
         
-        # Test connection
+        # Test connection and create tables
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            logger.info("✅ Database tables created")
         
         # Create session factory
         AsyncSessionLocal = async_sessionmaker(
@@ -211,7 +204,6 @@ async def generate_initial_matches(session):
             odds2 = round(random.uniform(1.3, 2.5), 2)
             odds_draw = round(random.uniform(2.5, 3.5), 2) if has_draw else None
             
-            # Random start time within next 2 hours
             start_time = datetime.utcnow() + timedelta(minutes=random.randint(5, 120))
             
             match = Match(
@@ -234,9 +226,20 @@ async def generate_initial_matches(session):
         logger.error(f"Error generating matches: {e}")
         await session.rollback()
 
+async def get_db():
+    """Get database session"""
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
 # ============================
-# TELEGRAM BOT HANDLERS
+# TELEGRAM BOT
 # ============================
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 @dp.message(CommandStart())
 async def command_start_handler(message: types.Message) -> None:
@@ -380,7 +383,7 @@ class GameManager:
     """Game logic manager"""
     
     @staticmethod
-    async def play_mines(user_id: int, amount: Decimal, mines_count: int, session: AsyncSession) -> Dict[str, Any]:
+    async def play_mines(user_id: int, amount: float, mines_count: int, session: AsyncSession) -> Dict[str, Any]:
         """Play Mines game"""
         try:
             # Get user
@@ -392,9 +395,7 @@ class GameManager:
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            # Convert to float for comparison
-            amount_float = float(amount)
-            if user.balance < amount_float:
+            if user.balance < amount:
                 raise HTTPException(status_code=400, detail="Insufficient funds")
             
             # Calculate multiplier
@@ -404,14 +405,14 @@ class GameManager:
             multiplier = round(1 / probability, 2)
             
             # Deduct amount
-            user.balance -= amount_float
-            potential_win = amount_float * multiplier
+            user.balance -= amount
+            potential_win = amount * multiplier
             
             # Create bet
             bet = Bet(
                 user_id=user_id,
                 game_type="mines",
-                amount=amount_float,
+                amount=amount,
                 potential_win=potential_win,
                 odds=multiplier,
                 selected_outcome=str(mines_count),
@@ -480,7 +481,7 @@ class GameManager:
             raise HTTPException(status_code=500, detail="Internal server error")
     
     @staticmethod
-    async def play_dice(user_id: int, amount: Decimal, bet_type: str, session: AsyncSession) -> Dict[str, Any]:
+    async def play_dice(user_id: int, amount: float, bet_type: str, session: AsyncSession) -> Dict[str, Any]:
         """Play Dice game"""
         try:
             # Get user
@@ -492,9 +493,7 @@ class GameManager:
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            # Convert to float
-            amount_float = float(amount)
-            if user.balance < amount_float:
+            if user.balance < amount:
                 raise HTTPException(status_code=400, detail="Insufficient funds")
             
             # Roll dice
@@ -506,12 +505,12 @@ class GameManager:
             win = (bet_type == "even" and is_even) or (bet_type == "odd" and not is_even)
             
             if win:
-                win_amount = amount_float * multiplier
+                win_amount = amount * multiplier
                 user.balance += win_amount
                 status = "won"
                 potential_win = win_amount
             else:
-                user.balance -= amount_float
+                user.balance -= amount
                 status = "lost"
                 potential_win = 0.0
             
@@ -519,7 +518,7 @@ class GameManager:
             bet = Bet(
                 user_id=user_id,
                 game_type="dice",
-                amount=amount_float,
+                amount=amount,
                 potential_win=potential_win,
                 odds=multiplier,
                 selected_outcome=bet_type,
@@ -544,7 +543,7 @@ class GameManager:
             raise HTTPException(status_code=500, detail="Internal server error")
     
     @staticmethod
-    async def start_crash(user_id: int, amount: Decimal, session: AsyncSession) -> Dict[str, Any]:
+    async def start_crash(user_id: int, amount: float, session: AsyncSession) -> Dict[str, Any]:
         """Start Crash game"""
         try:
             # Get user
@@ -556,9 +555,7 @@ class GameManager:
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            # Convert to float
-            amount_float = float(amount)
-            if user.balance < amount_float:
+            if user.balance < amount:
                 raise HTTPException(status_code=400, detail="Insufficient funds")
             
             # Generate crash point (5% instant crash)
@@ -568,13 +565,13 @@ class GameManager:
                 crash_point = round(random.uniform(1.01, 5.00), 2)
             
             # Deduct amount
-            user.balance -= amount_float
+            user.balance -= amount
             
             # Create crash game
             game = CrashGame(
                 user_id=user_id,
                 crash_point=crash_point,
-                bet_amount=amount_float,
+                bet_amount=amount,
                 is_active=True
             )
             
@@ -586,7 +583,7 @@ class GameManager:
                 "success": True,
                 "game_id": game.id,
                 "crash_point": crash_point,
-                "bet_amount": amount_float
+                "bet_amount": amount
             }
             
         except Exception as e:
@@ -681,18 +678,11 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Background tasks started")
     
     # Start Telegram bot in background
-    bot_task = asyncio.create_task(start_bot())
+    asyncio.create_task(start_bot())
     
     yield
     
     logger.info("🛑 Stopping Royal Bet API...")
-    
-    # Stop bot
-    bot_task.cancel()
-    try:
-        await bot_task
-    except asyncio.CancelledError:
-        pass
 
 # ============================
 # FASTAPI APP
@@ -761,12 +751,8 @@ async def api_init(request: Request):
         data = await request.json()
         init_data = data.get("initData", "")
         
-        # Parse Telegram WebApp initData (simplified)
-        # In production, verify the signature properly
-        
-        # For demo, use user from query params or create new
-        query_params = dict(request.query_params)
-        user_id = query_params.get("user_id", 123456789)
+        # For demo, use fixed user or from query
+        user_id = 123456789
         
         async with AsyncSessionLocal() as session:
             # Get or create user
@@ -778,7 +764,7 @@ async def api_init(request: Request):
             if not user:
                 user = User(
                     telegram_id=user_id,
-                    username=f"user_{user_id}",
+                    username="demo_user",
                     balance=5000.00
                 )
                 session.add(user)
@@ -943,7 +929,7 @@ async def game_action(request: Request):
                 
                 result = await GameManager.play_mines(
                     user_id,
-                    Decimal(str(amount)),
+                    amount,
                     mines_count,
                     session
                 )
@@ -954,7 +940,7 @@ async def game_action(request: Request):
                 
                 result = await GameManager.play_dice(
                     user_id,
-                    Decimal(str(amount)),
+                    amount,
                     dice_bet,
                     session
                 )
@@ -985,7 +971,7 @@ async def crash_start(request: Request):
         async with AsyncSessionLocal() as session:
             result = await GameManager.start_crash(
                 user_id,
-                Decimal(str(amount)),
+                amount,
                 session
             )
             
