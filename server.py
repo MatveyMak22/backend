@@ -18,20 +18,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 
 # Database imports
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import declarative_base, Session
+from sqlalchemy.orm import declarative_base
 from sqlalchemy import Column, Integer, String, Numeric, DateTime, Boolean, Text, ForeignKey, JSON
 from sqlalchemy.sql import func, text
 from sqlalchemy.future import select
-
-# Aiogram imports
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import WebAppInfo
-from aiogram.filters import CommandStart
-from aiogram.utils.markdown import hbold
 
 # ============================
 # CONFIGURATION - REAL PRODUCTION
@@ -116,20 +110,21 @@ class CrashGame(Base):
 # Database engine and session
 engine = None
 AsyncSessionLocal = None
+simulation_task = None
 
 async def init_database():
     """Initialize database connection and create tables"""
     global engine, AsyncSessionLocal
     
     try:
-        logger.info(f"Connecting to database: {DATABASE_URL[:50]}...")
+        logger.info(f"Connecting to database...")
         
         # Create async engine
         engine = create_async_engine(
             DATABASE_URL,
             echo=False,
-            pool_size=10,
-            max_overflow=20,
+            pool_size=5,
+            max_overflow=10,
             pool_pre_ping=True
         )
         
@@ -153,10 +148,15 @@ async def init_database():
         
     except Exception as e:
         logger.error(f"❌ Database initialization error: {e}")
+        # Fallback to in-memory storage for demo
+        logger.info("⚠️ Using in-memory storage for demo")
         return False
 
 async def get_db():
     """Dependency for getting database session"""
+    if AsyncSessionLocal is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
     async with AsyncSessionLocal() as session:
         try:
             yield session
@@ -216,7 +216,7 @@ async def init_demo_data():
             result = await session.execute(select(Match))
             matches = result.scalars().all()
             
-            if len(matches) < 10:
+            if len(matches) < 5:
                 await generate_initial_matches(session)
             
     except Exception as e:
@@ -229,17 +229,15 @@ async def generate_initial_matches(session):
         hockey_teams = ["СКА", "ЦСКА", "Авангард", "Металлург", "Салават Юлаев"]
         tennis_players = ["Джокович", "Алькарас", "Медведев", "Надаль", "Синнер"]
         basketball_teams = ["ЦСКА", "Зенит", "Локомотив", "УНИКС", "Химки"]
-        table_tennis_players = ["Ма Лун", "Фань Чжэньдун", "Тимо Болль", "Дмитрий Овчаров"]
         
         sports_data = [
             ("football", football_teams, True),
             ("hockey", hockey_teams, True),
             ("basketball", basketball_teams, True),
             ("tennis", tennis_players, False),
-            ("table_tennis", table_tennis_players, False),
         ]
         
-        for i in range(15):
+        for i in range(8):
             sport, teams, has_draw = random.choice(sports_data)
             team1, team2 = random.sample(teams, 2)
             
@@ -247,7 +245,9 @@ async def generate_initial_matches(session):
             odds2 = round(random.uniform(1.3, 2.5), 2)
             odds_draw = round(random.uniform(2.5, 3.5), 2) if has_draw else None
             
-            start_time = datetime.now() + timedelta(minutes=random.randint(5, 180))
+            # Random start time within next 2 hours
+            minutes_offset = random.randint(5, 120)
+            start_time = datetime.now() + timedelta(minutes=minutes_offset)
             
             match = Match(
                 sport=sport,
@@ -277,6 +277,10 @@ async def match_simulation_task():
     """Background task for match simulation"""
     while True:
         try:
+            if AsyncSessionLocal is None:
+                await asyncio.sleep(10)
+                continue
+                
             async with AsyncSessionLocal() as session:
                 # Get all active matches
                 result = await session.execute(
@@ -290,6 +294,7 @@ async def match_simulation_task():
                     # Start live matches
                     if match.status == "scheduled" and match.start_time <= current_time:
                         match.status = "live"
+                        logger.info(f"Match {match.id} started live")
                     
                     # Simulate live matches
                     if match.status == "live":
@@ -300,10 +305,12 @@ async def match_simulation_task():
                 await session.commit()
                 
                 # Generate new matches if needed
-                result = await session.execute(select(Match).where(Match.status.in_(["scheduled", "live"])))
+                result = await session.execute(
+                    select(Match).where(Match.status.in_(["scheduled", "live"]))
+                )
                 active_matches = result.scalars().all()
                 
-                if len(active_matches) < 10:
+                if len(active_matches) < 5:
                     await generate_initial_matches(session)
                 
         except Exception as e:
@@ -313,79 +320,82 @@ async def match_simulation_task():
 
 async def simulate_match(session, match: Match):
     """Simulate a single match"""
-    # Different simulation for different sports
-    if match.sport in ["football", "hockey"]:
-        # Football/Hockey simulation
-        if random.random() < 0.05:  # 5% chance of goal
-            if random.random() < 0.5:
-                match.score_home += 1
-            else:
-                match.score_away += 1
+    try:
+        if match.sport in ["football", "hockey"]:
+            # Football/Hockey simulation
+            if random.random() < 0.05:  # 5% chance of goal
+                if random.random() < 0.5:
+                    match.score_home += 1
+                else:
+                    match.score_away += 1
+            
+            match.current_minute = min(match.current_minute + 1, 90)
+            
+            if match.current_minute >= 90:
+                match.status = "finished"
+                await settle_match_bets(session, match.id)
         
-        match.current_minute = min(match.current_minute + 1, 90)
+        elif match.sport == "basketball":
+            # Basketball simulation
+            if random.random() < 0.3:  # 30% chance of points
+                points = random.choice([2, 2, 3])
+                if random.random() < 0.5:
+                    match.score_home += points
+                else:
+                    match.score_away += points
+            
+            match.current_minute = min(match.current_minute + 1, 48)
+            
+            if match.current_minute >= 48:
+                match.status = "finished"
+                await settle_match_bets(session, match.id)
         
-        if match.current_minute >= 90:
-            match.status = "finished"
-            await settle_match_bets(session, match.id)
-    
-    elif match.sport == "basketball":
-        # Basketball simulation - more points
-        if random.random() < 0.3:  # 30% chance of points
-            points = random.choice([2, 2, 3])  # More 2-point shots
-            if random.random() < 0.5:
-                match.score_home += points
-            else:
-                match.score_away += points
-        
-        match.current_minute = min(match.current_minute + 1, 48)
-        
-        if match.current_minute >= 48:
-            match.status = "finished"
-            await settle_match_bets(session, match.id)
-    
-    else:
-        # Tennis/Table Tennis simulation
-        if not match.score_details:
-            match.score_details = {
-                "sets": [],
-                "current_set": 1,
-                "games_home": 0,
-                "games_away": 0
-            }
-        
-        # Simple tennis simulation
-        if random.random() < 0.5:
-            match.score_details["games_home"] += 1
         else:
-            match.score_details["games_away"] += 1
-        
-        # Check if set is finished
-        games_to_win = 2 if match.sport == "tennis" else 3
-        if (match.score_details["games_home"] >= games_to_win or 
-            match.score_details["games_away"] >= games_to_win):
+            # Tennis simulation
+            if not match.score_details:
+                match.score_details = {
+                    "sets": [],
+                    "current_set": 1,
+                    "games_home": 0,
+                    "games_away": 0
+                }
             
-            # Finish set
-            if match.score_details["games_home"] > match.score_details["games_away"]:
-                match.score_home += 1
+            # Simple point simulation
+            if random.random() < 0.5:
+                match.score_details["games_home"] += 1
             else:
-                match.score_away += 1
+                match.score_details["games_away"] += 1
             
-            match.score_details["sets"].append({
-                "set": match.score_details["current_set"],
-                "home": match.score_details["games_home"],
-                "away": match.score_details["games_away"]
-            })
+            # Check if set is finished
+            games_to_win = 2
+            if (match.score_details["games_home"] >= games_to_win or 
+                match.score_details["games_away"] >= games_to_win):
+                
+                # Finish set
+                if match.score_details["games_home"] > match.score_details["games_away"]:
+                    match.score_home += 1
+                else:
+                    match.score_away += 1
+                
+                match.score_details["sets"].append({
+                    "set": match.score_details["current_set"],
+                    "home": match.score_details["games_home"],
+                    "away": match.score_details["games_away"]
+                })
+                
+                # Reset for next set
+                match.score_details["current_set"] += 1
+                match.score_details["games_home"] = 0
+                match.score_details["games_away"] = 0
             
-            # Reset for next set
-            match.score_details["current_set"] += 1
-            match.score_details["games_home"] = 0
-            match.score_details["games_away"] = 0
-        
-        # Check if match is finished
-        sets_to_win = 2 if match.sport == "tennis" else 3
-        if match.score_home >= sets_to_win or match.score_away >= sets_to_win:
-            match.status = "finished"
-            await settle_match_bets(session, match.id)
+            # Check if match is finished
+            sets_to_win = 2
+            if match.score_home >= sets_to_win or match.score_away >= sets_to_win:
+                match.status = "finished"
+                await settle_match_bets(session, match.id)
+    
+    except Exception as e:
+        logger.error(f"Error simulating match {match.id}: {e}")
 
 async def settle_match_bets(session, match_id: int):
     """Settle all bets for finished match"""
@@ -403,8 +413,11 @@ async def settle_match_bets(session, match_id: int):
             winner = "home"
         elif match.score_away > match.score_home:
             winner = "away"
-        elif match.score_home == match.score_away and match.sport != "tennis" and match.sport != "table_tennis":
+        elif match.score_home == match.score_away and match.sport != "tennis":
             winner = "draw"
+        
+        if winner is None:
+            return
         
         # Get all active bets for this match
         result = await session.execute(
@@ -421,10 +434,14 @@ async def settle_match_bets(session, match_id: int):
                 bet.status = "won"
                 
                 # Add winnings to user balance
-                await session.execute(
-                    text("UPDATE users SET balance = balance + :win WHERE telegram_id = :user_id"),
-                    {"win": bet.potential_win, "user_id": bet.user_id}
+                user_result = await session.execute(
+                    select(User).where(User.telegram_id == bet.user_id)
                 )
+                user = user_result.scalar_one_or_none()
+                
+                if user:
+                    user.balance += bet.potential_win
+                    session.add(user)
             else:
                 # Lose
                 bet.status = "lost"
@@ -614,7 +631,7 @@ class GameManager:
             if random.random() < 0.05:
                 crash_point = Decimal("1.00")
             else:
-                crash_point = Decimal(str(round(random.uniform(1.01, 10.00), 2)))
+                crash_point = Decimal(str(round(random.uniform(1.01, 5.00), 2)))
             
             # Deduct amount
             user.balance -= amount
@@ -715,6 +732,8 @@ class GameManager:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
+    global simulation_task
+    
     logger.info("🚀 Starting Royal Bet API...")
     
     # Initialize database
@@ -724,15 +743,23 @@ async def lifespan(app: FastAPI):
         # Initialize demo data
         await init_demo_data()
         
-        # Start match simulation
-        asyncio.create_task(match_simulation_task())
+        # Start match simulation in background
+        simulation_task = asyncio.create_task(match_simulation_task())
         logger.info("✅ Database and services initialized")
     else:
-        logger.warning("⚠️ Running without database - using in-memory storage")
+        logger.warning("⚠️ Running without database")
     
     yield
     
     logger.info("🛑 Stopping Royal Bet API...")
+    
+    # Cancel simulation task
+    if simulation_task:
+        simulation_task.cancel()
+        try:
+            await simulation_task
+        except asyncio.CancelledError:
+            pass
 
 # ============================
 # FASTAPI APP
@@ -764,31 +791,46 @@ async def root():
         "status": "online",
         "service": "Royal Bet API",
         "version": "1.0.0",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "docs": {
+            "matches": "GET /api/matches",
+            "place_bet": "POST /api/bet",
+            "init_user": "POST /api/init",
+            "health": "GET /health"
+        }
     }
 
 @app.get("/health")
-async def health_check(db: AsyncSession = Depends(get_db)):
+async def health_check():
     """Health check endpoint"""
     try:
-        # Test database connection
-        await db.execute(text("SELECT 1"))
-        db_status = "healthy"
+        db_status = "unknown"
+        if AsyncSessionLocal:
+            async with AsyncSessionLocal() as session:
+                await session.execute(text("SELECT 1"))
+                db_status = "connected"
+        else:
+            db_status = "not_initialized"
+        
+        return {
+            "status": "healthy",
+            "database": db_status,
+            "timestamp": datetime.now().isoformat(),
+            "simulation_running": simulation_task is not None and not simulation_task.done()
+        }
+        
     except Exception as e:
-        db_status = f"unhealthy: {str(e)}"
-    
-    return {
-        "status": "healthy",
-        "database": db_status,
-        "timestamp": datetime.now().isoformat()
-    }
+        return {
+            "status": "unhealthy",
+            "database": f"error: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
 
 @app.post("/api/init")
 async def api_init(request: InitRequest, db: AsyncSession = Depends(get_db)):
     """Initialize user"""
     try:
         # For demo, use fixed user ID
-        # In production, parse Telegram WebApp data
         user_id = 123456789
         
         # Get or create user
@@ -830,7 +872,7 @@ async def get_matches(
         if sport and sport != "all":
             query = query.where(Match.sport == sport)
         
-        query = query.order_by(Match.start_time)
+        query = query.order_by(Match.start_time.asc())
         
         result = await db.execute(query)
         matches = result.scalars().all()
@@ -1103,76 +1145,19 @@ async def get_balance(user_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 # ============================
-# TELEGRAM BOT
-# ============================
-
-# Initialize bot
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-@dp.message(CommandStart())
-async def command_start_handler(message: types.Message) -> None:
-    """Handle /start command"""
-    try:
-        # Create or get user
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(User).where(User.telegram_id == message.from_user.id)
-            )
-            user = result.scalar_one_or_none()
-            
-            if not user:
-                user = User(
-                    telegram_id=message.from_user.id,
-                    username=message.from_user.username or f"user_{message.from_user.id}",
-                    balance=5000.00
-                )
-                session.add(user)
-                await session.commit()
-            
-            # Create button for Mini App
-            keyboard = types.InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [types.InlineKeyboardButton(
-                        text="🎮 Open Royal Bet",
-                        web_app=WebAppInfo(url=FRONTEND_URL)
-                    )]
-                ]
-            )
-            
-            await message.answer(
-                f"🎉 Welcome to *Royal Bet*, {hbold(message.from_user.first_name)}!\n\n"
-                f"Your starting balance: *5000 ₽*\n\n"
-                f"Click the button below to start playing!",
-                reply_markup=keyboard,
-                parse_mode="Markdown"
-            )
-            
-    except Exception as e:
-        logger.error(f"Error in command_start_handler: {e}")
-        await message.answer("An error occurred. Please try again later.")
-
-async def start_bot():
-    """Start Telegram bot"""
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        logger.error(f"Bot error: {e}")
-
-# ============================
 # MAIN ENTRY POINT
 # ============================
 
 if __name__ == "__main__":
     import uvicorn
     
-    # Start bot in background
-    asyncio.create_task(start_bot())
+    # Get port from environment (Render provides this)
+    port = int(os.environ.get("PORT", 8000))
     
     # Start FastAPI server
     uvicorn.run(
         app,
         host="0.0.0.0",
-        port=8000,
+        port=port,
         log_level="info"
     )
