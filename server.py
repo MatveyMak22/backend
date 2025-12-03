@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Royal Bet - Telegram Mini App Backend
-Production Ready Version with PostgreSQL
+Complete Version with Telegram Bot
 """
 
 import os
@@ -15,7 +15,7 @@ from decimal import Decimal
 from contextlib import asynccontextmanager
 
 # FastAPI imports
-from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -23,24 +23,24 @@ from pydantic import BaseModel, Field
 # Database imports
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from sqlalchemy import Column, Integer, String, Numeric, DateTime, Boolean, Text, ForeignKey, JSON
-from sqlalchemy.sql import func, text
+from sqlalchemy import Column, Integer, String, Numeric, DateTime, Boolean, Text, JSON
+from sqlalchemy.sql import text
 from sqlalchemy.future import select
 
+# Aiogram imports
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import WebAppInfo
+from aiogram.filters import CommandStart
+from aiogram.utils.markdown import hbold
+
 # ============================
-# CONFIGURATION - REAL PRODUCTION
+# CONFIGURATION
 # ============================
 
-# REAL CONFIG - MODIFY THESE!
-BOT_TOKEN = "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE"
-# Use this DATABASE_URL for Neon.tech PostgreSQL
+# IMPORTANT: Set these values!
+BOT_TOKEN = "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE"  # Your bot token
 DATABASE_URL = "postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-FRONTEND_URL = "https://matveymak22.github.io/Cas"
-
-# Проверка конфигурации
-if not BOT_TOKEN or "YOUR_BOT_TOKEN" in BOT_TOKEN:
-    print("⚠️ ВНИМАНИЕ: Установите реальный BOT_TOKEN!")
-    raise ValueError("Please set BOT_TOKEN")
+FRONTEND_URL = "https://matveymak22.github.io/Cas"  # Your GitHub Pages URL
 
 # Настройка логирования
 logging.basicConfig(
@@ -48,6 +48,14 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# ============================
+# TELEGRAM BOT SETUP
+# ============================
+
+# Initialize bot and dispatcher
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 # ============================
 # DATABASE SETUP
@@ -61,18 +69,18 @@ class User(Base):
     telegram_id = Column(Integer, primary_key=True)
     username = Column(String(100))
     balance = Column(Numeric(10, 2), default=5000.00)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Match(Base):
     __tablename__ = "matches"
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     sport = Column(String(50))
     team_home = Column(String(100))
     team_away = Column(String(100))
     score_home = Column(Integer, default=0)
     score_away = Column(Integer, default=0)
-    score_details = Column(JSON)
+    score_details = Column(JSON, default={})
     status = Column(String(20), default="scheduled")
     odds_home = Column(Numeric(5, 2), default=2.00)
     odds_draw = Column(Numeric(5, 2), default=3.00)
@@ -84,40 +92,39 @@ class Match(Base):
 class Bet(Base):
     __tablename__ = "bets"
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('users.telegram_id'))
-    match_id = Column(Integer, ForeignKey('matches.id'), nullable=True)
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
+    match_id = Column(Integer, nullable=True)
     game_type = Column(String(20))
     amount = Column(Numeric(10, 2))
     status = Column(String(20), default="active")
     potential_win = Column(Numeric(10, 2))
     odds = Column(Numeric(5, 2))
     selected_outcome = Column(String(50))
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=datetime.utcnow)
     settled_at = Column(DateTime, nullable=True)
 
 class CrashGame(Base):
     __tablename__ = "crash_games"
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey('users.telegram_id'))
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer)
     crash_point = Column(Numeric(5, 2))
     bet_amount = Column(Numeric(10, 2))
     current_multiplier = Column(Numeric(5, 2), default=1.00)
     is_active = Column(Boolean, default=True)
-    created_at = Column(DateTime, server_default=func.now())
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 # Database engine and session
 engine = None
 AsyncSessionLocal = None
-simulation_task = None
 
 async def init_database():
-    """Initialize database connection and create tables"""
+    """Initialize PostgreSQL database"""
     global engine, AsyncSessionLocal
     
     try:
-        logger.info(f"Connecting to database...")
+        logger.info("🔄 Initializing PostgreSQL database...")
         
         # Create async engine
         engine = create_async_engine(
@@ -130,7 +137,8 @@ async def init_database():
         
         # Test connection
         async with engine.begin() as conn:
-            await conn.execute(text("SELECT 1"))
+            await conn.run_sync(Base.metadata.create_all)
+            logger.info("✅ Database tables created")
         
         # Create session factory
         AsyncSessionLocal = async_sessionmaker(
@@ -139,62 +147,18 @@ async def init_database():
             expire_on_commit=False
         )
         
-        # Create tables
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        # Initialize demo data
+        await init_demo_data()
         
         logger.info("✅ Database initialized successfully")
         return True
         
     except Exception as e:
         logger.error(f"❌ Database initialization error: {e}")
-        # Fallback to in-memory storage for demo
-        logger.info("⚠️ Using in-memory storage for demo")
         return False
 
-async def get_db():
-    """Dependency for getting database session"""
-    if AsyncSessionLocal is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    
-    async with AsyncSessionLocal() as session:
-        try:
-            yield session
-        finally:
-            await session.close()
-
-# ============================
-# PYDANTIC SCHEMAS
-# ============================
-
-class InitRequest(BaseModel):
-    initData: str
-
-class BetRequest(BaseModel):
-    user_id: int
-    match_id: Optional[int] = None
-    game_type: str
-    amount: Decimal = Field(gt=0)
-    outcome: str
-    odds: Optional[Decimal] = None
-
-class GameRequest(BaseModel):
-    user_id: int
-    game_type: str
-    amount: Decimal = Field(gt=0)
-    mines_count: Optional[int] = Field(None, ge=3, le=24)
-    dice_bet: Optional[str] = None
-
-class CashoutRequest(BaseModel):
-    user_id: int
-    crash_id: int
-
-# ============================
-# DATA INITIALIZATION
-# ============================
-
 async def init_demo_data():
-    """Initialize demo data if database is empty"""
+    """Initialize demo data"""
     try:
         async with AsyncSessionLocal() as session:
             # Check if we have users
@@ -229,15 +193,17 @@ async def generate_initial_matches(session):
         hockey_teams = ["СКА", "ЦСКА", "Авангард", "Металлург", "Салават Юлаев"]
         tennis_players = ["Джокович", "Алькарас", "Медведев", "Надаль", "Синнер"]
         basketball_teams = ["ЦСКА", "Зенит", "Локомотив", "УНИКС", "Химки"]
+        table_tennis_players = ["Ма Лун", "Фань Чжэньдун", "Тимо Болль", "Дмитрий Овчаров"]
         
         sports_data = [
             ("football", football_teams, True),
             ("hockey", hockey_teams, True),
             ("basketball", basketball_teams, True),
             ("tennis", tennis_players, False),
+            ("table_tennis", table_tennis_players, False),
         ]
         
-        for i in range(8):
+        for i in range(10):
             sport, teams, has_draw = random.choice(sports_data)
             team1, team2 = random.sample(teams, 2)
             
@@ -246,8 +212,7 @@ async def generate_initial_matches(session):
             odds_draw = round(random.uniform(2.5, 3.5), 2) if has_draw else None
             
             # Random start time within next 2 hours
-            minutes_offset = random.randint(5, 120)
-            start_time = datetime.now() + timedelta(minutes=minutes_offset)
+            start_time = datetime.utcnow() + timedelta(minutes=random.randint(5, 120))
             
             match = Match(
                 sport=sport,
@@ -270,11 +235,64 @@ async def generate_initial_matches(session):
         await session.rollback()
 
 # ============================
-# MATCH SIMULATION TASK
+# TELEGRAM BOT HANDLERS
+# ============================
+
+@dp.message(CommandStart())
+async def command_start_handler(message: types.Message) -> None:
+    """Handle /start command"""
+    try:
+        async with AsyncSessionLocal() as session:
+            # Get or create user
+            result = await session.execute(
+                select(User).where(User.telegram_id == message.from_user.id)
+            )
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                user = User(
+                    telegram_id=message.from_user.id,
+                    username=message.from_user.username or f"user_{message.from_user.id}",
+                    balance=5000.00
+                )
+                session.add(user)
+                await session.commit()
+            
+            # Create button for Mini App
+            keyboard = types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [types.InlineKeyboardButton(
+                        text="🎮 Открыть Royal Bet",
+                        web_app=WebAppInfo(url=FRONTEND_URL)
+                    )]
+                ]
+            )
+            
+            await message.answer(
+                f"🎉 Добро пожаловать в *Royal Bet*, {hbold(message.from_user.first_name)}!\n\n"
+                f"Ваш стартовый баланс: *5000 ₽*\n\n"
+                f"Нажмите кнопку ниже, чтобы начать игру!",
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+            
+    except Exception as e:
+        logger.error(f"Error in command_start_handler: {e}")
+        await message.answer("Произошла ошибка. Пожалуйста, попробуйте позже.")
+
+async def start_bot():
+    """Start Telegram bot polling"""
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+
+# ============================
+# MATCH SIMULATION
 # ============================
 
 async def match_simulation_task():
-    """Background task for match simulation"""
+    """Background match simulation"""
     while True:
         try:
             if AsyncSessionLocal is None:
@@ -282,13 +300,13 @@ async def match_simulation_task():
                 continue
                 
             async with AsyncSessionLocal() as session:
-                # Get all active matches
+                # Get active matches
                 result = await session.execute(
                     select(Match).where(Match.status.in_(["scheduled", "live"]))
                 )
                 matches = result.scalars().all()
                 
-                current_time = datetime.now()
+                current_time = datetime.utcnow()
                 
                 for match in matches:
                     # Start live matches
@@ -304,26 +322,16 @@ async def match_simulation_task():
                 
                 await session.commit()
                 
-                # Generate new matches if needed
-                result = await session.execute(
-                    select(Match).where(Match.status.in_(["scheduled", "live"]))
-                )
-                active_matches = result.scalars().all()
-                
-                if len(active_matches) < 5:
-                    await generate_initial_matches(session)
-                
         except Exception as e:
             logger.error(f"Error in match simulation: {e}")
         
-        await asyncio.sleep(10)  # Update every 10 seconds
+        await asyncio.sleep(5)
 
 async def simulate_match(session, match: Match):
-    """Simulate a single match"""
+    """Simulate a match"""
     try:
         if match.sport in ["football", "hockey"]:
-            # Football/Hockey simulation
-            if random.random() < 0.05:  # 5% chance of goal
+            if random.random() < 0.05:
                 if random.random() < 0.5:
                     match.score_home += 1
                 else:
@@ -333,11 +341,9 @@ async def simulate_match(session, match: Match):
             
             if match.current_minute >= 90:
                 match.status = "finished"
-                await settle_match_bets(session, match.id)
         
         elif match.sport == "basketball":
-            # Basketball simulation
-            if random.random() < 0.3:  # 30% chance of points
+            if random.random() < 0.3:
                 points = random.choice([2, 2, 3])
                 if random.random() < 0.5:
                     match.score_home += points
@@ -348,133 +354,47 @@ async def simulate_match(session, match: Match):
             
             if match.current_minute >= 48:
                 match.status = "finished"
-                await settle_match_bets(session, match.id)
         
-        else:
-            # Tennis simulation
+        else:  # Tennis/Table Tennis
             if not match.score_details:
-                match.score_details = {
-                    "sets": [],
-                    "current_set": 1,
-                    "games_home": 0,
-                    "games_away": 0
-                }
+                match.score_details = {"sets": []}
             
-            # Simple point simulation
+            # Simple simulation
             if random.random() < 0.5:
-                match.score_details["games_home"] += 1
+                match.score_home += 1
             else:
-                match.score_details["games_away"] += 1
+                match.score_away += 1
             
-            # Check if set is finished
-            games_to_win = 2
-            if (match.score_details["games_home"] >= games_to_win or 
-                match.score_details["games_away"] >= games_to_win):
-                
-                # Finish set
-                if match.score_details["games_home"] > match.score_details["games_away"]:
-                    match.score_home += 1
-                else:
-                    match.score_away += 1
-                
-                match.score_details["sets"].append({
-                    "set": match.score_details["current_set"],
-                    "home": match.score_details["games_home"],
-                    "away": match.score_details["games_away"]
-                })
-                
-                # Reset for next set
-                match.score_details["current_set"] += 1
-                match.score_details["games_home"] = 0
-                match.score_details["games_away"] = 0
-            
-            # Check if match is finished
-            sets_to_win = 2
+            sets_to_win = 2 if match.sport == "tennis" else 3
             if match.score_home >= sets_to_win or match.score_away >= sets_to_win:
                 match.status = "finished"
-                await settle_match_bets(session, match.id)
     
     except Exception as e:
-        logger.error(f"Error simulating match {match.id}: {e}")
-
-async def settle_match_bets(session, match_id: int):
-    """Settle all bets for finished match"""
-    try:
-        # Get the match
-        result = await session.execute(select(Match).where(Match.id == match_id))
-        match = result.scalar_one_or_none()
-        
-        if not match:
-            return
-        
-        # Determine winner
-        winner = None
-        if match.score_home > match.score_away:
-            winner = "home"
-        elif match.score_away > match.score_home:
-            winner = "away"
-        elif match.score_home == match.score_away and match.sport != "tennis":
-            winner = "draw"
-        
-        if winner is None:
-            return
-        
-        # Get all active bets for this match
-        result = await session.execute(
-            select(Bet).where(
-                Bet.match_id == match_id,
-                Bet.status == "active"
-            )
-        )
-        bets = result.scalars().all()
-        
-        for bet in bets:
-            if bet.selected_outcome == winner:
-                # Win
-                bet.status = "won"
-                
-                # Add winnings to user balance
-                user_result = await session.execute(
-                    select(User).where(User.telegram_id == bet.user_id)
-                )
-                user = user_result.scalar_one_or_none()
-                
-                if user:
-                    user.balance += bet.potential_win
-                    session.add(user)
-            else:
-                # Lose
-                bet.status = "lost"
-            
-            bet.settled_at = datetime.now()
-            session.add(bet)
-        
-        await session.commit()
-        logger.info(f"✅ Settled bets for match {match_id}")
-        
-    except Exception as e:
-        logger.error(f"Error settling bets: {e}")
-        await session.rollback()
+        logger.error(f"Error simulating match: {e}")
 
 # ============================
 # GAME MANAGER
 # ============================
 
 class GameManager:
-    """Manager for mini-games"""
+    """Game logic manager"""
     
     @staticmethod
     async def play_mines(user_id: int, amount: Decimal, mines_count: int, session: AsyncSession) -> Dict[str, Any]:
         """Play Mines game"""
         try:
             # Get user
-            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
+            )
             user = result.scalar_one_or_none()
             
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            if user.balance < amount:
+            # Convert to float for comparison
+            amount_float = float(amount)
+            if user.balance < amount_float:
                 raise HTTPException(status_code=400, detail="Insufficient funds")
             
             # Calculate multiplier
@@ -484,14 +404,15 @@ class GameManager:
             multiplier = round(1 / probability, 2)
             
             # Deduct amount
-            user.balance -= amount
+            user.balance -= amount_float
+            potential_win = amount_float * multiplier
             
             # Create bet
             bet = Bet(
                 user_id=user_id,
                 game_type="mines",
-                amount=amount,
-                potential_win=amount * Decimal(multiplier),
+                amount=amount_float,
+                potential_win=potential_win,
                 odds=multiplier,
                 selected_outcome=str(mines_count),
                 status="active"
@@ -511,7 +432,8 @@ class GameManager:
             
         except Exception as e:
             await session.rollback()
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"Error in play_mines: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
     
     @staticmethod
     async def cashout_mines(user_id: int, bet_id: int, session: AsyncSession) -> Dict[str, Any]:
@@ -531,7 +453,9 @@ class GameManager:
                 raise HTTPException(status_code=404, detail="Bet not found")
             
             # Get user
-            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
+            )
             user = result.scalar_one_or_none()
             
             if not user:
@@ -540,7 +464,7 @@ class GameManager:
             # Add winnings
             user.balance += bet.potential_win
             bet.status = "won"
-            bet.settled_at = datetime.now()
+            bet.settled_at = datetime.utcnow()
             
             await session.commit()
             
@@ -552,20 +476,25 @@ class GameManager:
             
         except Exception as e:
             await session.rollback()
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"Error in cashout_mines: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
     
     @staticmethod
     async def play_dice(user_id: int, amount: Decimal, bet_type: str, session: AsyncSession) -> Dict[str, Any]:
         """Play Dice game"""
         try:
             # Get user
-            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
+            )
             user = result.scalar_one_or_none()
             
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            if user.balance < amount:
+            # Convert to float
+            amount_float = float(amount)
+            if user.balance < amount_float:
                 raise HTTPException(status_code=400, detail="Insufficient funds")
             
             # Roll dice
@@ -573,29 +502,29 @@ class GameManager:
             is_even = dice_roll % 2 == 0
             
             # Determine win
-            multiplier = Decimal("2.0")
+            multiplier = 2.0
             win = (bet_type == "even" and is_even) or (bet_type == "odd" and not is_even)
             
             if win:
-                win_amount = amount * multiplier
+                win_amount = amount_float * multiplier
                 user.balance += win_amount
                 status = "won"
                 potential_win = win_amount
             else:
-                user.balance -= amount
+                user.balance -= amount_float
                 status = "lost"
-                potential_win = Decimal("0")
+                potential_win = 0.0
             
             # Create bet
             bet = Bet(
                 user_id=user_id,
                 game_type="dice",
-                amount=amount,
+                amount=amount_float,
                 potential_win=potential_win,
                 odds=multiplier,
                 selected_outcome=bet_type,
                 status=status,
-                settled_at=datetime.now() if not win else None
+                settled_at=datetime.utcnow() if not win else None
             )
             
             session.add(bet)
@@ -605,42 +534,47 @@ class GameManager:
                 "success": True,
                 "dice_result": dice_roll,
                 "win": win,
-                "win_amount": float(win_amount) if win else 0,
+                "win_amount": win_amount if win else 0,
                 "new_balance": float(user.balance)
             }
             
         except Exception as e:
             await session.rollback()
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"Error in play_dice: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
     
     @staticmethod
     async def start_crash(user_id: int, amount: Decimal, session: AsyncSession) -> Dict[str, Any]:
         """Start Crash game"""
         try:
             # Get user
-            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
+            )
             user = result.scalar_one_or_none()
             
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            if user.balance < amount:
+            # Convert to float
+            amount_float = float(amount)
+            if user.balance < amount_float:
                 raise HTTPException(status_code=400, detail="Insufficient funds")
             
             # Generate crash point (5% instant crash)
             if random.random() < 0.05:
-                crash_point = Decimal("1.00")
+                crash_point = 1.00
             else:
-                crash_point = Decimal(str(round(random.uniform(1.01, 5.00), 2)))
+                crash_point = round(random.uniform(1.01, 5.00), 2)
             
             # Deduct amount
-            user.balance -= amount
+            user.balance -= amount_float
             
             # Create crash game
             game = CrashGame(
                 user_id=user_id,
                 crash_point=crash_point,
-                bet_amount=amount,
+                bet_amount=amount_float,
                 is_active=True
             )
             
@@ -651,13 +585,14 @@ class GameManager:
             return {
                 "success": True,
                 "game_id": game.id,
-                "crash_point": float(crash_point),
-                "bet_amount": float(amount)
+                "crash_point": crash_point,
+                "bet_amount": amount_float
             }
             
         except Exception as e:
             await session.rollback()
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"Error in start_crash: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
     
     @staticmethod
     async def cashout_crash(user_id: int, game_id: int, session: AsyncSession) -> Dict[str, Any]:
@@ -677,18 +612,20 @@ class GameManager:
                 raise HTTPException(status_code=404, detail="Game not found")
             
             # Get user
-            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
+            )
             user = result.scalar_one_or_none()
             
             if not user:
                 raise HTTPException(status_code=404, detail="User not found")
             
-            # Generate current multiplier (simulation)
-            current_multiplier = Decimal(str(round(random.uniform(1.0, float(game.crash_point) - 0.1), 2)))
+            # Generate current multiplier
+            current_multiplier = round(random.uniform(1.0, float(game.crash_point) - 0.1), 2)
             
             if current_multiplier >= game.crash_point:
                 # Crash - lose
-                win_amount = Decimal("0")
+                win_amount = 0.0
                 status = "lost"
                 game.is_active = False
             else:
@@ -708,7 +645,7 @@ class GameManager:
                 odds=current_multiplier,
                 selected_outcome="cashout",
                 status=status,
-                settled_at=datetime.now()
+                settled_at=datetime.utcnow()
             )
             
             session.add(bet)
@@ -716,14 +653,15 @@ class GameManager:
             
             return {
                 "success": True,
-                "multiplier": float(current_multiplier),
-                "win_amount": float(win_amount),
+                "multiplier": current_multiplier,
+                "win_amount": win_amount,
                 "new_balance": float(user.balance)
             }
             
         except Exception as e:
             await session.rollback()
-            raise HTTPException(status_code=500, detail=str(e))
+            logger.error(f"Error in cashout_crash: {e}")
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 # ============================
 # APPLICATION LIFESPAN
@@ -731,35 +669,30 @@ class GameManager:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager"""
-    global simulation_task
-    
+    """Application lifecycle"""
     logger.info("🚀 Starting Royal Bet API...")
     
     # Initialize database
     db_ok = await init_database()
     
     if db_ok:
-        # Initialize demo data
-        await init_demo_data()
-        
-        # Start match simulation in background
-        simulation_task = asyncio.create_task(match_simulation_task())
-        logger.info("✅ Database and services initialized")
-    else:
-        logger.warning("⚠️ Running without database")
+        # Start background tasks
+        asyncio.create_task(match_simulation_task())
+        logger.info("✅ Background tasks started")
+    
+    # Start Telegram bot in background
+    bot_task = asyncio.create_task(start_bot())
     
     yield
     
     logger.info("🛑 Stopping Royal Bet API...")
     
-    # Cancel simulation task
-    if simulation_task:
-        simulation_task.cancel()
-        try:
-            await simulation_task
-        except asyncio.CancelledError:
-            pass
+    # Stop bot
+    bot_task.cancel()
+    try:
+        await bot_task
+    except asyncio.CancelledError:
+        pass
 
 # ============================
 # FASTAPI APP
@@ -791,241 +724,246 @@ async def root():
         "status": "online",
         "service": "Royal Bet API",
         "version": "1.0.0",
-        "timestamp": datetime.now().isoformat(),
-        "docs": {
-            "matches": "GET /api/matches",
-            "place_bet": "POST /api/bet",
-            "init_user": "POST /api/init",
-            "health": "GET /health"
-        }
+        "bot": "running",
+        "frontend": FRONTEND_URL,
+        "timestamp": datetime.utcnow().isoformat()
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
+    """Health check"""
     try:
-        db_status = "unknown"
         if AsyncSessionLocal:
             async with AsyncSessionLocal() as session:
                 await session.execute(text("SELECT 1"))
-                db_status = "connected"
+            db_status = "connected"
         else:
             db_status = "not_initialized"
         
         return {
             "status": "healthy",
             "database": db_status,
-            "timestamp": datetime.now().isoformat(),
-            "simulation_running": simulation_task is not None and not simulation_task.done()
+            "bot_token": "configured" if BOT_TOKEN else "missing",
+            "frontend_url": FRONTEND_URL,
+            "timestamp": datetime.utcnow().isoformat()
         }
-        
     except Exception as e:
         return {
             "status": "unhealthy",
-            "database": f"error: {str(e)}",
-            "timestamp": datetime.now().isoformat()
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
         }
 
 @app.post("/api/init")
-async def api_init(request: InitRequest, db: AsyncSession = Depends(get_db)):
-    """Initialize user"""
+async def api_init(request: Request):
+    """Initialize user from Telegram WebApp"""
     try:
-        # For demo, use fixed user ID
-        user_id = 123456789
+        data = await request.json()
+        init_data = data.get("initData", "")
         
-        # Get or create user
-        result = await db.execute(select(User).where(User.telegram_id == user_id))
-        user = result.scalar_one_or_none()
+        # Parse Telegram WebApp initData (simplified)
+        # In production, verify the signature properly
         
-        if not user:
-            user = User(
-                telegram_id=user_id,
-                username="demo_user",
-                balance=5000.00
+        # For demo, use user from query params or create new
+        query_params = dict(request.query_params)
+        user_id = query_params.get("user_id", 123456789)
+        
+        async with AsyncSessionLocal() as session:
+            # Get or create user
+            result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
             )
-            db.add(user)
-            await db.commit()
-            await db.refresh(user)
-        
-        return {
-            "success": True,
-            "user": {
-                "id": user.telegram_id,
-                "username": user.username,
-                "balance": float(user.balance)
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                user = User(
+                    telegram_id=user_id,
+                    username=f"user_{user_id}",
+                    balance=5000.00
+                )
+                session.add(user)
+                await session.commit()
+                await session.refresh(user)
+            
+            return {
+                "success": True,
+                "user": {
+                    "id": user.telegram_id,
+                    "username": user.username,
+                    "balance": float(user.balance)
+                }
             }
-        }
-        
+            
     except Exception as e:
         logger.error(f"Error in /api/init: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/matches")
-async def get_matches(
-    sport: Optional[str] = None, 
-    db: AsyncSession = Depends(get_db)
-):
-    """Get matches list"""
+async def get_matches(sport: Optional[str] = None):
+    """Get matches"""
     try:
-        query = select(Match).where(Match.status.in_(["scheduled", "live"]))
-        
-        if sport and sport != "all":
-            query = query.where(Match.sport == sport)
-        
-        query = query.order_by(Match.start_time.asc())
-        
-        result = await db.execute(query)
-        matches = result.scalars().all()
-        
-        matches_list = []
-        for match in matches:
-            match_data = {
-                "id": match.id,
-                "sport": match.sport,
-                "team_home": match.team_home,
-                "team_away": match.team_away,
-                "score_home": match.score_home,
-                "score_away": match.score_away,
-                "score_details": match.score_details or {},
-                "status": match.status,
-                "odds_home": float(match.odds_home),
-                "odds_draw": float(match.odds_draw) if match.odds_draw else None,
-                "odds_away": float(match.odds_away),
-                "start_time": match.start_time.isoformat() if match.start_time else None,
-                "current_minute": match.current_minute,
-                "period": match.period
-            }
-            matches_list.append(match_data)
-        
-        return {"matches": matches_list}
-        
+        async with AsyncSessionLocal() as session:
+            query = select(Match).where(Match.status.in_(["scheduled", "live"]))
+            
+            if sport and sport != "all":
+                query = query.where(Match.sport == sport)
+            
+            query = query.order_by(Match.start_time.asc())
+            
+            result = await session.execute(query)
+            matches = result.scalars().all()
+            
+            matches_list = []
+            for match in matches:
+                matches_list.append({
+                    "id": match.id,
+                    "sport": match.sport,
+                    "team_home": match.team_home,
+                    "team_away": match.team_away,
+                    "score_home": match.score_home,
+                    "score_away": match.score_away,
+                    "score_details": match.score_details or {},
+                    "status": match.status,
+                    "odds_home": float(match.odds_home),
+                    "odds_draw": float(match.odds_draw) if match.odds_draw else None,
+                    "odds_away": float(match.odds_away),
+                    "start_time": match.start_time.isoformat() if match.start_time else None,
+                    "current_minute": match.current_minute,
+                    "period": match.period
+                })
+            
+            return {"matches": matches_list}
+            
     except Exception as e:
         logger.error(f"Error in /api/matches: {e}")
         return {"matches": []}
 
 @app.post("/api/bet")
-async def place_bet(bet_request: BetRequest, db: AsyncSession = Depends(get_db)):
+async def place_bet(request: Request):
     """Place a bet"""
     try:
-        # Validate minimum bet
-        min_bet = Decimal("50.00") if bet_request.game_type == "sport" else Decimal("10.00")
+        data = await request.json()
         
-        if bet_request.amount < min_bet:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Minimum bet: {min_bet} ₽"
+        user_id = data.get("user_id")
+        match_id = data.get("match_id")
+        game_type = data.get("game_type", "sport")
+        amount = float(data.get("amount", 0))
+        outcome = data.get("outcome")
+        odds = data.get("odds")
+        
+        # Validate
+        min_bet = 50.00 if game_type == "sport" else 10.00
+        if amount < min_bet:
+            raise HTTPException(status_code=400, detail=f"Minimum bet: {min_bet} ₽")
+        
+        async with AsyncSessionLocal() as session:
+            # Get user
+            result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
             )
-        
-        # Get user
-        result = await db.execute(select(User).where(User.telegram_id == bet_request.user_id))
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        if user.balance < bet_request.amount:
-            raise HTTPException(status_code=400, detail="Insufficient funds")
-        
-        # Get odds if not provided
-        odds = bet_request.odds
-        if not odds and bet_request.match_id:
-            result = await db.execute(select(Match).where(Match.id == bet_request.match_id))
-            match = result.scalar_one_or_none()
+            user = result.scalar_one_or_none()
             
-            if match:
-                if bet_request.outcome == "home":
-                    odds = match.odds_home
-                elif bet_request.outcome == "draw":
-                    odds = match.odds_draw if match.odds_draw else Decimal("0")
-                elif bet_request.outcome == "away":
-                    odds = match.odds_away
-        
-        if not odds:
-            odds = Decimal("2.00")
-        
-        # Calculate potential win
-        potential_win = bet_request.amount * odds
-        
-        # Deduct amount
-        user.balance -= bet_request.amount
-        
-        # Create bet
-        bet = Bet(
-            user_id=bet_request.user_id,
-            match_id=bet_request.match_id,
-            game_type=bet_request.game_type,
-            amount=bet_request.amount,
-            odds=odds,
-            selected_outcome=bet_request.outcome,
-            potential_win=potential_win,
-            status="active"
-        )
-        
-        db.add(bet)
-        await db.commit()
-        await db.refresh(bet)
-        
-        return {
-            "success": True,
-            "bet_id": bet.id,
-            "potential_win": float(potential_win),
-            "new_balance": float(user.balance)
-        }
-        
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            if user.balance < amount:
+                raise HTTPException(status_code=400, detail="Insufficient funds")
+            
+            # Get odds
+            odds_float = 2.00
+            if odds:
+                odds_float = float(odds)
+            elif match_id:
+                result = await session.execute(
+                    select(Match).where(Match.id == match_id)
+                )
+                match = result.scalar_one_or_none()
+                if match:
+                    if outcome == "home":
+                        odds_float = float(match.odds_home)
+                    elif outcome == "draw":
+                        odds_float = float(match.odds_draw) if match.odds_draw else 0
+                    elif outcome == "away":
+                        odds_float = float(match.odds_away)
+            
+            # Calculate win
+            potential_win = amount * odds_float
+            
+            # Deduct amount
+            user.balance -= amount
+            
+            # Create bet
+            bet = Bet(
+                user_id=user_id,
+                match_id=match_id,
+                game_type=game_type,
+                amount=amount,
+                potential_win=potential_win,
+                odds=odds_float,
+                selected_outcome=outcome,
+                status="active"
+            )
+            
+            session.add(bet)
+            await session.commit()
+            await session.refresh(bet)
+            
+            return {
+                "success": True,
+                "bet_id": bet.id,
+                "potential_win": potential_win,
+                "new_balance": float(user.balance)
+            }
+            
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error in /api/bet: {e}")
-        await db.rollback()
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/game")
-async def game_action(game_request: GameRequest, db: AsyncSession = Depends(get_db)):
-    """Play mini-game"""
+async def game_action(request: Request):
+    """Play game"""
     try:
-        # Validate minimum bet
-        if game_request.amount < Decimal("10.00"):
-            raise HTTPException(
-                status_code=400,
-                detail="Minimum bet in games: 10 ₽"
-            )
+        data = await request.json()
         
-        if game_request.game_type == "mines":
-            if not game_request.mines_count:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Specify number of mines"
+        user_id = data.get("user_id")
+        game_type = data.get("game_type")
+        amount = float(data.get("amount", 0))
+        mines_count = data.get("mines_count")
+        dice_bet = data.get("dice_bet")
+        
+        if amount < 10.00:
+            raise HTTPException(status_code=400, detail="Minimum bet: 10 ₽")
+        
+        async with AsyncSessionLocal() as session:
+            if game_type == "mines":
+                if not mines_count:
+                    raise HTTPException(status_code=400, detail="Specify mines count")
+                
+                result = await GameManager.play_mines(
+                    user_id,
+                    Decimal(str(amount)),
+                    mines_count,
+                    session
                 )
-            
-            result = await GameManager.play_mines(
-                game_request.user_id,
-                game_request.amount,
-                game_request.mines_count,
-                db
-            )
-            
-        elif game_request.game_type == "dice":
-            if not game_request.dice_bet:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Specify bet type (odd/even)"
+                
+            elif game_type == "dice":
+                if not dice_bet:
+                    raise HTTPException(status_code=400, detail="Specify bet type")
+                
+                result = await GameManager.play_dice(
+                    user_id,
+                    Decimal(str(amount)),
+                    dice_bet,
+                    session
                 )
+                
+            else:
+                raise HTTPException(status_code=400, detail="Invalid game type")
             
-            result = await GameManager.play_dice(
-                game_request.user_id,
-                game_request.amount,
-                game_request.dice_bet,
-                db
-            )
+            return {"success": True, **result}
             
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Unsupported game type"
-            )
-        
-        return {"success": True, **result}
-        
     except HTTPException:
         raise
     except Exception as e:
@@ -1033,23 +971,26 @@ async def game_action(game_request: GameRequest, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/crash/start")
-async def crash_start(game_request: GameRequest, db: AsyncSession = Depends(get_db)):
-    """Start Crash game"""
+async def crash_start(request: Request):
+    """Start crash game"""
     try:
-        if game_request.amount < Decimal("10.00"):
-            raise HTTPException(
-                status_code=400,
-                detail="Minimum bet in Crash: 10 ₽"
+        data = await request.json()
+        
+        user_id = data.get("user_id")
+        amount = float(data.get("amount", 0))
+        
+        if amount < 10.00:
+            raise HTTPException(status_code=400, detail="Minimum bet: 10 ₽")
+        
+        async with AsyncSessionLocal() as session:
+            result = await GameManager.start_crash(
+                user_id,
+                Decimal(str(amount)),
+                session
             )
-        
-        result = await GameManager.start_crash(
-            game_request.user_id,
-            game_request.amount,
-            db
-        )
-        
-        return {"success": True, **result}
-        
+            
+            return {"success": True, **result}
+            
     except HTTPException:
         raise
     except Exception as e:
@@ -1057,17 +998,23 @@ async def crash_start(game_request: GameRequest, db: AsyncSession = Depends(get_
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/crash/cashout")
-async def crash_cashout(cashout_request: CashoutRequest, db: AsyncSession = Depends(get_db)):
-    """Cashout Crash game"""
+async def crash_cashout(request: Request):
+    """Cashout crash"""
     try:
-        result = await GameManager.cashout_crash(
-            cashout_request.user_id,
-            cashout_request.crash_id,
-            db
-        )
+        data = await request.json()
         
-        return {"success": True, **result}
+        user_id = data.get("user_id")
+        crash_id = data.get("crash_id")
         
+        async with AsyncSessionLocal() as session:
+            result = await GameManager.cashout_crash(
+                user_id,
+                crash_id,
+                session
+            )
+            
+            return {"success": True, **result}
+            
     except HTTPException:
         raise
     except Exception as e:
@@ -1075,17 +1022,23 @@ async def crash_cashout(cashout_request: CashoutRequest, db: AsyncSession = Depe
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/api/mines/cashout")
-async def mines_cashout(cashout_request: CashoutRequest, db: AsyncSession = Depends(get_db)):
-    """Cashout Mines game"""
+async def mines_cashout(request: Request):
+    """Cashout mines"""
     try:
-        result = await GameManager.cashout_mines(
-            cashout_request.user_id,
-            cashout_request.crash_id,  # This is bet_id for mines
-            db
-        )
+        data = await request.json()
         
-        return {"success": True, **result}
+        user_id = data.get("user_id")
+        crash_id = data.get("crash_id")  # bet_id for mines
         
+        async with AsyncSessionLocal() as session:
+            result = await GameManager.cashout_mines(
+                user_id,
+                crash_id,
+                session
+            )
+            
+            return {"success": True, **result}
+            
     except HTTPException:
         raise
     except Exception as e:
@@ -1093,51 +1046,55 @@ async def mines_cashout(cashout_request: CashoutRequest, db: AsyncSession = Depe
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/api/history")
-async def get_history(user_id: int, limit: int = 20, db: AsyncSession = Depends(get_db)):
+async def get_history(user_id: int, limit: int = 20):
     """Get bet history"""
     try:
-        query = (
-            select(Bet)
-            .where(Bet.user_id == user_id)
-            .order_by(Bet.created_at.desc())
-            .limit(limit)
-        )
-        
-        result = await db.execute(query)
-        bets = result.scalars().all()
-        
-        history = []
-        for bet in bets:
-            history.append({
-                "id": bet.id,
-                "game_type": bet.game_type,
-                "amount": float(bet.amount),
-                "potential_win": float(bet.potential_win),
-                "odds": float(bet.odds),
-                "status": bet.status,
-                "outcome": bet.selected_outcome,
-                "created_at": bet.created_at.isoformat() if bet.created_at else None,
-                "settled_at": bet.settled_at.isoformat() if bet.settled_at else None
-            })
-        
-        return {"history": history}
-        
+        async with AsyncSessionLocal() as session:
+            query = (
+                select(Bet)
+                .where(Bet.user_id == user_id)
+                .order_by(Bet.created_at.desc())
+                .limit(limit)
+            )
+            
+            result = await session.execute(query)
+            bets = result.scalars().all()
+            
+            history = []
+            for bet in bets:
+                history.append({
+                    "id": bet.id,
+                    "game_type": bet.game_type,
+                    "amount": float(bet.amount),
+                    "potential_win": float(bet.potential_win),
+                    "odds": float(bet.odds),
+                    "status": bet.status,
+                    "outcome": bet.selected_outcome,
+                    "created_at": bet.created_at.isoformat() if bet.created_at else None,
+                    "settled_at": bet.settled_at.isoformat() if bet.settled_at else None
+                })
+            
+            return {"history": history}
+            
     except Exception as e:
         logger.error(f"Error in /api/history: {e}")
         return {"history": []}
 
 @app.get("/api/balance")
-async def get_balance(user_id: int, db: AsyncSession = Depends(get_db)):
-    """Get user balance"""
+async def get_balance(user_id: int):
+    """Get balance"""
     try:
-        result = await db.execute(select(User).where(User.telegram_id == user_id))
-        user = result.scalar_one_or_none()
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        return {"balance": float(user.balance)}
-        
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(User).where(User.telegram_id == user_id)
+            )
+            user = result.scalar_one_or_none()
+            
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+            
+            return {"balance": float(user.balance)}
+            
     except HTTPException:
         raise
     except Exception as e:
@@ -1151,10 +1108,8 @@ async def get_balance(user_id: int, db: AsyncSession = Depends(get_db)):
 if __name__ == "__main__":
     import uvicorn
     
-    # Get port from environment (Render provides this)
     port = int(os.environ.get("PORT", 8000))
     
-    # Start FastAPI server
     uvicorn.run(
         app,
         host="0.0.0.0",
