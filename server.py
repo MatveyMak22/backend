@@ -24,7 +24,7 @@ from aiogram.utils.markdown import hbold
 # Твои данные
 BOT_TOKEN = "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE"
 FRONTEND_URL = "https://matveymak22.github.io/Cas" 
-# Ссылка на базу данных (замени если нужно, или оставь переменную окружения)
+# Ссылка на базу данных
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require")
 
 # Настройка логов
@@ -64,14 +64,14 @@ class Match(Base):
     odds_draw = Column(Numeric(5, 2), nullable=True)
     odds_away = Column(Numeric(5, 2))
     period = Column(String(20), default="")
-    score_details = Column(JSON, default={}) # Для сетов/таймов
-    details = Column(JSON, default={})       # Для доп. ставок (тоталы, форы)
+    score_details = Column(JSON, default={}) 
+    details = Column(JSON, default={})       
 
 class Bet(Base):
     __tablename__ = "bets"
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger)
-    game_type = Column(String(20)) # sport, mines, dice, crash
+    game_type = Column(String(20)) 
     amount = Column(Numeric(10, 2))
     status = Column(String(20), default="active")
     potential_win = Column(Numeric(10, 2), default=0)
@@ -86,7 +86,7 @@ class ActiveGame(Base):
     user_id = Column(BigInteger)
     game_type = Column(String(20))
     bet_amount = Column(Numeric(10, 2))
-    game_data = Column(JSON) # Поле мин или точка краша
+    game_data = Column(JSON) 
     is_active = Column(Boolean, default=True)
 
 # Инициализация и наполнение БД
@@ -95,7 +95,6 @@ def init_db():
         Base.metadata.create_all(bind=engine)
         session = SessionLocal()
         
-        # Если матчей нет, создаем их с подробными деталями
         if session.query(Match).count() == 0:
             logger.info("Генерация матчей и коэффициентов...")
             matches_data = [
@@ -110,7 +109,6 @@ def init_db():
             ]
             
             for sport, t1, t2, has_draw in matches_data:
-                # Генерируем доп. ставки для модального окна
                 details = {
                     "total_val": 2.5,
                     "total_over": round(random.uniform(1.6, 2.1), 2),
@@ -132,7 +130,7 @@ def init_db():
                     odds_away=round(random.uniform(1.4, 3.5), 2),
                     odds_draw=round(random.uniform(2.8, 4.2), 2) if has_draw else None,
                     period="1st Half" if sport == "football" else "1st Period",
-                    details=details, # Важно для кнопки "Детали"
+                    details=details,
                     score_details={"sets": [{"home": 6, "away": 4}]} if sport == "tennis" else {}
                 )
                 session.add(match)
@@ -146,7 +144,6 @@ def init_db():
 # ============================
 
 def get_user_from_init_data(init_data_str):
-    """Разбирает строку initData от Telegram для идентификации пользователя"""
     if not init_data_str or init_data_str == 'mock':
         return 123456789, "Test User"
     
@@ -209,8 +206,6 @@ def api_matches():
     matches = query.all()
     result = []
     for m in matches:
-        # Ваш HTML использует поле details для модального окна
-        # score_details для отображения счета в теннисе
         result.append({
             "id": m.id, "sport": m.sport,
             "team_home": m.team_home, "team_away": m.team_away,
@@ -238,10 +233,8 @@ def api_place_bet():
         session.close()
         return jsonify({"success": False, "message": "Недостаточно средств"})
     
-    # Списываем баланс
     user.balance -= amount
     
-    # Сохраняем ставку
     match = session.query(Match).get(data.get('match_id'))
     match_info = {"teams": f"{match.team_home} vs {match.team_away}"} if match else {}
     
@@ -263,7 +256,7 @@ def api_place_bet():
         "potential_win": pot_win
     })
 
-# --- ИГРЫ (Поддержка логики HTML) ---
+# --- ИГРЫ ---
 
 @app.route('/api/game', methods=['POST'])
 def api_game_start():
@@ -283,9 +276,8 @@ def api_game_start():
     response = {}
     
     if game_type == 'dice':
-        # Логика Dice
         dice_res = random.randint(1, 6)
-        bet_type = data.get('dice_bet') # odd/even
+        bet_type = data.get('dice_bet')
         is_win = (dice_res % 2 == 0 and bet_type == 'even') or (dice_res % 2 != 0 and bet_type == 'odd')
         win_amt = 0
         
@@ -297,23 +289,17 @@ def api_game_start():
         session.add(bet)
         
         response = {
-            "success": True,
-            "dice_result": dice_res,
-            "win": is_win,
-            "win_amount": win_amt,
+            "success": True, "dice_result": dice_res,
+            "win": is_win, "win_amount": win_amt,
             "new_balance": float(user.balance)
         }
         
     elif game_type == 'mines':
-        # Ваш HTML ожидает, что сервер вернет 'field' (массив 0 и 1)
         mines_count = int(data.get('mines_count', 3))
-        
         field = [0] * 25
         indices = random.sample(range(25), mines_count)
-        for i in indices:
-            field[i] = 1
+        for i in indices: field[i] = 1
             
-        # Сохраняем игру в active_games
         active_game = ActiveGame(
             user_id=user_id, game_type='mines', bet_amount=amount,
             game_data={"field": field, "mines_count": mines_count}
@@ -321,12 +307,9 @@ def api_game_start():
         session.add(active_game)
         session.commit()
         
-        # Отправляем bet_id и field клиенту
         response = {
-            "success": True,
-            "bet_id": active_game.id,
-            "field": field, 
-            "new_balance": float(user.balance)
+            "success": True, "bet_id": active_game.id,
+            "field": field, "new_balance": float(user.balance)
         }
     
     session.commit()
@@ -336,7 +319,6 @@ def api_game_start():
 @app.route('/api/mines/cashout', methods=['POST'])
 def api_mines_cashout():
     data = request.json
-    # В HTML вы используете crash_id для передачи ID игры мины
     game_id = data.get('crash_id') 
     user_id = data.get('user_id')
     
@@ -347,18 +329,13 @@ def api_mines_cashout():
         session.close()
         return jsonify({"success": False, "message": "Игра не найдена"})
         
-    # Считаем выигрыш. Для простоты симулируем множитель,
-    # так как HTML считает логику открытия клеток на фронтенде.
-    # Если запрос пришел - значит игрок нажал "Забрать" и не взорвался.
-    multiplier = 1.45 # Примерный множитель, можно усложнить
+    multiplier = 1.45 
     win_amount = float(game.bet_amount) * multiplier
     
     user = session.query(User).filter_by(telegram_id=user_id).first()
     user.balance += win_amount
-    
     game.is_active = False
     
-    # Сохраняем историю
     bet = Bet(
         user_id=user_id, game_type='mines', amount=game.bet_amount, 
         status='won', odds=multiplier, outcome=f"mines_win", 
@@ -369,12 +346,7 @@ def api_mines_cashout():
     
     new_bal = float(user.balance)
     session.close()
-    
-    return jsonify({
-        "success": True,
-        "new_balance": new_bal,
-        "win_amount": win_amount
-    })
+    return jsonify({"success": True, "new_balance": new_bal, "win_amount": win_amount})
 
 @app.route('/api/crash/start', methods=['POST'])
 def api_crash_start():
@@ -390,8 +362,6 @@ def api_crash_start():
         return jsonify({"success": False, "message": "Недостаточно средств"})
     
     user.balance -= amount
-    
-    # Ваш HTML ждет 'crash_point' сразу
     crash_point = round(random.uniform(1.0, 5.0), 2)
     if random.random() < 0.1: crash_point = 1.0
     
@@ -400,10 +370,8 @@ def api_crash_start():
     session.commit()
     
     response = {
-        "success": True,
-        "game_id": game.id,
-        "crash_point": float(crash_point),
-        "new_balance": float(user.balance)
+        "success": True, "game_id": game.id,
+        "crash_point": float(crash_point), "new_balance": float(user.balance)
     }
     session.close()
     return jsonify(response)
@@ -421,8 +389,6 @@ def api_crash_cashout():
         session.close()
         return jsonify({"success": False})
     
-    # Клиент знает точку краша. Если запрос пришел - значит игрок успел вывести.
-    # Вычисляем множитель чуть меньше точки краша (эмуляция момента нажатия)
     crash_point = float(game.game_data['crash_point'])
     user_mult = crash_point - 0.05
     if user_mult < 1.01: user_mult = 1.01
@@ -431,7 +397,6 @@ def api_crash_cashout():
     
     user = session.query(User).filter_by(telegram_id=user_id).first()
     user.balance += win_amount
-    
     game.is_active = False
     
     bet = Bet(
@@ -446,10 +411,8 @@ def api_crash_cashout():
     session.close()
     
     return jsonify({
-        "success": True,
-        "new_balance": new_bal,
-        "win_amount": win_amount,
-        "multiplier": user_mult
+        "success": True, "new_balance": new_bal,
+        "win_amount": win_amount, "multiplier": user_mult
     })
 
 @app.route('/api/history', methods=['GET'])
@@ -460,42 +423,38 @@ def api_history():
     
     history = []
     for b in bets:
-        item = {
-            "game_type": b.game_type,
-            "amount": float(b.amount),
-            "status": b.status,
-            "odds": float(b.odds),
-            "outcome": b.outcome,
-            "created_at": b.created_at.isoformat(),
+        history.append({
+            "game_type": b.game_type, "amount": float(b.amount),
+            "status": b.status, "odds": float(b.odds),
+            "outcome": b.outcome, "created_at": b.created_at.isoformat(),
             "match_info": b.match_info
-        }
-        history.append(item)
-    
+        })
     session.close()
     return jsonify({"history": history})
 
 # ============================
-# ЗАПУСК БОТА (В ФОНЕ)
+# ЗАПУСК БОТА (ФОН)
 # ============================
 
 async def start_bot_async():
+    # Инициализация бота
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
     @dp.message(CommandStart())
     async def cmd_start(message: types.Message):
-        # Кнопка для открытия Web App
         kb = types.InlineKeyboardMarkup(inline_keyboard=[[
             types.InlineKeyboardButton(text="🎰 Играть в Royal Bet", web_app=WebAppInfo(url=FRONTEND_URL))
         ]])
         await message.answer(
             f"Привет, {hbold(message.from_user.first_name)}!\n\n"
-            "Жми кнопку ниже, чтобы начать игру и делать ставки!",
+            "Жми кнопку ниже, чтобы начать игру!",
             reply_markup=kb
         )
 
     try:
-        await dp.start_polling(bot)
+        # ВАЖНО: handle_signals=False нужен для работы в потоке!
+        await dp.start_polling(bot, handle_signals=False)
     except Exception as e:
         logger.error(f"Bot error: {e}")
 
@@ -506,13 +465,13 @@ def run_bot_in_thread():
     loop.close()
 
 if __name__ == '__main__':
-    # Инициализация БД
+    # Сначала создаем таблицы
     init_db()
     
-    # Запуск бота в отдельном потоке
+    # Запускаем бота в отдельном потоке
     bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
     bot_thread.start()
     
-    # Запуск Flask сервера
+    # Запускаем Flask сервер
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
