@@ -6,6 +6,7 @@ import threading
 import asyncio
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs
+from decimal import Decimal # Важный импорт
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -21,13 +22,10 @@ from aiogram.utils.markdown import hbold
 # КОНФИГУРАЦИЯ
 # ============================
 
-# Твои данные
 BOT_TOKEN = "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE"
 FRONTEND_URL = "https://matveymak22.github.io/Cas" 
-# Ссылка на базу данных
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require")
 
-# Настройка логов
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -42,7 +40,6 @@ engine = create_engine(DATABASE_URL, pool_size=20, max_overflow=30)
 SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
 Base = declarative_base()
 
-# --- МОДЕЛИ ---
 class User(Base):
     __tablename__ = "users"
     telegram_id = Column(BigInteger, primary_key=True)
@@ -89,14 +86,12 @@ class ActiveGame(Base):
     game_data = Column(JSON) 
     is_active = Column(Boolean, default=True)
 
-# Инициализация и наполнение БД
 def init_db():
     try:
         Base.metadata.create_all(bind=engine)
         session = SessionLocal()
-        
         if session.query(Match).count() == 0:
-            logger.info("Генерация матчей и коэффициентов...")
+            logger.info("Генерация матчей...")
             matches_data = [
                 ("football", "Real Madrid", "Barcelona", True),
                 ("football", "Man City", "Arsenal", True),
@@ -107,7 +102,6 @@ def init_db():
                 ("football", "Bayern", "Dortmund", True),
                 ("hockey", "Tampa Bay", "Washington", True)
             ]
-            
             for sport, t1, t2, has_draw in matches_data:
                 details = {
                     "total_val": 2.5,
@@ -119,10 +113,8 @@ def init_db():
                     "both_score_yes": round(random.uniform(1.5, 2.0), 2),
                     "both_score_no": round(random.uniform(1.8, 2.4), 2)
                 }
-
                 match = Match(
-                    sport=sport,
-                    team_home=t1, team_away=t2,
+                    sport=sport, team_home=t1, team_away=t2,
                     score_home=random.randint(0, 3), score_away=random.randint(0, 3),
                     status=random.choice(["live", "scheduled"]),
                     start_time=datetime.utcnow() + timedelta(minutes=random.randint(10, 300)),
@@ -139,24 +131,16 @@ def init_db():
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}")
 
-# ============================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ============================
-
 def get_user_from_init_data(init_data_str):
     if not init_data_str or init_data_str == 'mock':
         return 123456789, "Test User"
-    
     try:
         parsed = parse_qs(init_data_str)
         if 'user' in parsed:
             user_data = json.loads(parsed['user'][0])
-            user_id = int(user_data.get('id'))
-            username = user_data.get('username') or user_data.get('first_name') or "User"
-            return user_id, username
+            return int(user_data.get('id')), user_data.get('username') or user_data.get('first_name') or "User"
     except Exception as e:
         logger.error(f"Error parsing initData: {e}")
-        
     return 123456789, "Test User"
 
 # ============================
@@ -167,23 +151,18 @@ def get_user_from_init_data(init_data_str):
 def api_init():
     data = request.json
     user_id, username = get_user_from_init_data(data.get('initData'))
-    
     session = SessionLocal()
     user = session.query(User).filter_by(telegram_id=user_id).first()
-    
     if not user:
         user = User(telegram_id=user_id, username=username, balance=5000.00)
         session.add(user)
         session.commit()
-    
-    return jsonify({
+    response = {
         "success": True,
-        "user": {
-            "id": user.telegram_id,
-            "username": user.username,
-            "balance": float(user.balance)
-        }
-    })
+        "user": {"id": user.telegram_id, "username": user.username, "balance": float(user.balance)}
+    }
+    session.close()
+    return jsonify(response)
 
 @app.route('/api/balance', methods=['GET'])
 def api_balance():
@@ -199,10 +178,8 @@ def api_matches():
     sport = request.args.get('sport', 'all')
     session = SessionLocal()
     query = session.query(Match)
-    
     if sport != 'all':
         query = query.filter_by(sport=sport)
-        
     matches = query.all()
     result = []
     for m in matches:
@@ -213,9 +190,7 @@ def api_matches():
             "status": m.status, "start_time": m.start_time.isoformat(),
             "odds_home": float(m.odds_home), "odds_away": float(m.odds_away),
             "odds_draw": float(m.odds_draw) if m.odds_draw else None,
-            "period": m.period, 
-            "score_details": m.score_details,
-            "details": m.details 
+            "period": m.period, "score_details": m.score_details, "details": m.details 
         })
     session.close()
     return jsonify({"matches": result})
@@ -224,24 +199,29 @@ def api_matches():
 def api_place_bet():
     data = request.json
     user_id = data.get('user_id')
-    amount = float(data.get('amount'))
+    amount_float = float(data.get('amount')) # Получаем float
+    amount_dec = Decimal(amount_float)       # Конвертируем в Decimal для БД
     
     session = SessionLocal()
     user = session.query(User).filter_by(telegram_id=user_id).first()
     
-    if not user or user.balance < amount:
+    if not user or user.balance < amount_dec:
         session.close()
         return jsonify({"success": False, "message": "Недостаточно средств"})
     
-    user.balance -= amount
+    # ИСПРАВЛЕНО: Decimal - Decimal
+    user.balance -= amount_dec
     
     match = session.query(Match).get(data.get('match_id'))
     match_info = {"teams": f"{match.team_home} vs {match.team_away}"} if match else {}
     
+    odds_val = Decimal(str(data.get('odds', 1.0)))
+    potential = amount_dec * odds_val
+    
     bet = Bet(
-        user_id=user_id, game_type="sport", amount=amount,
-        status="active", odds=data.get('odds'), outcome=data.get('outcome'),
-        match_info=match_info, potential_win=amount * float(data.get('odds', 1))
+        user_id=user_id, game_type="sport", amount=amount_dec,
+        status="active", odds=odds_val, outcome=data.get('outcome'),
+        match_info=match_info, potential_win=potential
     )
     session.add(bet)
     session.commit()
@@ -249,48 +229,43 @@ def api_place_bet():
     new_bal = float(user.balance)
     pot_win = float(bet.potential_win)
     session.close()
-    
-    return jsonify({
-        "success": True, 
-        "new_balance": new_bal,
-        "potential_win": pot_win
-    })
-
-# --- ИГРЫ ---
+    return jsonify({"success": True, "new_balance": new_bal, "potential_win": pot_win})
 
 @app.route('/api/game', methods=['POST'])
 def api_game_start():
     data = request.json
     game_type = data.get('game_type')
     user_id = data.get('user_id')
-    amount = float(data.get('amount'))
+    amount_float = float(data.get('amount'))
+    amount_dec = Decimal(amount_float) # Конвертация
     
     session = SessionLocal()
     user = session.query(User).filter_by(telegram_id=user_id).first()
     
-    if not user or user.balance < amount:
+    if not user or user.balance < amount_dec:
         session.close()
         return jsonify({"success": False, "message": "Недостаточно средств"})
     
-    user.balance -= amount
+    # ИСПРАВЛЕНО: Decimal - Decimal
+    user.balance -= amount_dec
     response = {}
     
     if game_type == 'dice':
         dice_res = random.randint(1, 6)
         bet_type = data.get('dice_bet')
         is_win = (dice_res % 2 == 0 and bet_type == 'even') or (dice_res % 2 != 0 and bet_type == 'odd')
-        win_amt = 0
+        win_amt = Decimal(0)
         
         if is_win:
-            win_amt = amount * 2.0
+            win_amt = amount_dec * Decimal(2.0)
             user.balance += win_amt
             
-        bet = Bet(user_id=user_id, game_type='dice', amount=amount, status='won' if is_win else 'lost', odds=2.0, outcome=f"{bet_type} ({dice_res})")
+        bet = Bet(user_id=user_id, game_type='dice', amount=amount_dec, status='won' if is_win else 'lost', odds=2.0, outcome=f"{bet_type} ({dice_res})")
         session.add(bet)
         
         response = {
             "success": True, "dice_result": dice_res,
-            "win": is_win, "win_amount": win_amt,
+            "win": is_win, "win_amount": float(win_amt),
             "new_balance": float(user.balance)
         }
         
@@ -301,12 +276,11 @@ def api_game_start():
         for i in indices: field[i] = 1
             
         active_game = ActiveGame(
-            user_id=user_id, game_type='mines', bet_amount=amount,
+            user_id=user_id, game_type='mines', bet_amount=amount_dec,
             game_data={"field": field, "mines_count": mines_count}
         )
         session.add(active_game)
         session.commit()
-        
         response = {
             "success": True, "bet_id": active_game.id,
             "field": field, "new_balance": float(user.balance)
@@ -319,7 +293,7 @@ def api_game_start():
 @app.route('/api/mines/cashout', methods=['POST'])
 def api_mines_cashout():
     data = request.json
-    game_id = data.get('crash_id') 
+    game_id = data.get('crash_id')
     user_id = data.get('user_id')
     
     session = SessionLocal()
@@ -329,8 +303,9 @@ def api_mines_cashout():
         session.close()
         return jsonify({"success": False, "message": "Игра не найдена"})
         
-    multiplier = 1.45 
-    win_amount = float(game.bet_amount) * multiplier
+    multiplier = Decimal(1.45)
+    # ИСПРАВЛЕНО: Decimal * Decimal
+    win_amount = game.bet_amount * multiplier
     
     user = session.query(User).filter_by(telegram_id=user_id).first()
     user.balance += win_amount
@@ -346,26 +321,29 @@ def api_mines_cashout():
     
     new_bal = float(user.balance)
     session.close()
-    return jsonify({"success": True, "new_balance": new_bal, "win_amount": win_amount})
+    return jsonify({"success": True, "new_balance": new_bal, "win_amount": float(win_amount)})
 
 @app.route('/api/crash/start', methods=['POST'])
 def api_crash_start():
     data = request.json
     user_id = data.get('user_id')
-    amount = float(data.get('amount'))
+    amount_float = float(data.get('amount'))
+    amount_dec = Decimal(amount_float) # Конвертация
     
     session = SessionLocal()
     user = session.query(User).filter_by(telegram_id=user_id).first()
     
-    if not user or user.balance < amount:
+    if not user or user.balance < amount_dec:
         session.close()
         return jsonify({"success": False, "message": "Недостаточно средств"})
     
-    user.balance -= amount
+    # ИСПРАВЛЕНО: Decimal - Decimal
+    user.balance -= amount_dec
+    
     crash_point = round(random.uniform(1.0, 5.0), 2)
     if random.random() < 0.1: crash_point = 1.0
     
-    game = ActiveGame(user_id=user_id, game_type='crash', bet_amount=amount, game_data={"crash_point": crash_point})
+    game = ActiveGame(user_id=user_id, game_type='crash', bet_amount=amount_dec, game_data={"crash_point": crash_point})
     session.add(game)
     session.commit()
     
@@ -390,10 +368,13 @@ def api_crash_cashout():
         return jsonify({"success": False})
     
     crash_point = float(game.game_data['crash_point'])
-    user_mult = crash_point - 0.05
-    if user_mult < 1.01: user_mult = 1.01
+    user_mult_float = crash_point - 0.05
+    if user_mult_float < 1.01: user_mult_float = 1.01
     
-    win_amount = float(game.bet_amount) * user_mult
+    user_mult_dec = Decimal(str(round(user_mult_float, 2)))
+    
+    # ИСПРАВЛЕНО: Decimal * Decimal
+    win_amount = game.bet_amount * user_mult_dec
     
     user = session.query(User).filter_by(telegram_id=user_id).first()
     user.balance += win_amount
@@ -401,7 +382,7 @@ def api_crash_cashout():
     
     bet = Bet(
         user_id=user_id, game_type='crash', amount=game.bet_amount, 
-        status='won', odds=user_mult, outcome="cashout", 
+        status='won', odds=user_mult_dec, outcome="cashout", 
         potential_win=win_amount
     )
     session.add(bet)
@@ -412,7 +393,7 @@ def api_crash_cashout():
     
     return jsonify({
         "success": True, "new_balance": new_bal,
-        "win_amount": win_amount, "multiplier": user_mult
+        "win_amount": float(win_amount), "multiplier": float(user_mult_dec)
     })
 
 @app.route('/api/history', methods=['GET'])
@@ -420,7 +401,6 @@ def api_history():
     user_id = request.args.get('user_id')
     session = SessionLocal()
     bets = session.query(Bet).filter_by(user_id=user_id).order_by(Bet.created_at.desc()).limit(20).all()
-    
     history = []
     for b in bets:
         history.append({
@@ -432,28 +412,16 @@ def api_history():
     session.close()
     return jsonify({"history": history})
 
-# ============================
-# ЗАПУСК БОТА (ФОН)
-# ============================
-
 async def start_bot_async():
-    # Инициализация бота
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
-
     @dp.message(CommandStart())
     async def cmd_start(message: types.Message):
         kb = types.InlineKeyboardMarkup(inline_keyboard=[[
             types.InlineKeyboardButton(text="🎰 Играть в Royal Bet", web_app=WebAppInfo(url=FRONTEND_URL))
         ]])
-        await message.answer(
-            f"Привет, {hbold(message.from_user.first_name)}!\n\n"
-            "Жми кнопку ниже, чтобы начать игру!",
-            reply_markup=kb
-        )
-
+        await message.answer(f"Привет, {hbold(message.from_user.first_name)}! Жми кнопку:", reply_markup=kb)
     try:
-        # ВАЖНО: handle_signals=False нужен для работы в потоке!
         await dp.start_polling(bot, handle_signals=False)
     except Exception as e:
         logger.error(f"Bot error: {e}")
@@ -465,13 +433,8 @@ def run_bot_in_thread():
     loop.close()
 
 if __name__ == '__main__':
-    # Сначала создаем таблицы
     init_db()
-    
-    # Запускаем бота в отдельном потоке
     bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
     bot_thread.start()
-    
-    # Запускаем Flask сервер
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
