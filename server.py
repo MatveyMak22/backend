@@ -1,478 +1,211 @@
-import os
-import random
-import json
-import logging
-import threading
 import asyncio
-from datetime import datetime, timedelta
-from urllib.parse import parse_qs
-from decimal import Decimal
+import logging
+import os
+import sys
+from pathlib import Path
 
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from sqlalchemy import create_engine, Column, Integer, BigInteger, String, Numeric, DateTime, Boolean, JSON
-from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session
+from aiogram import Bot, Dispatcher, F, html
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode, ContentType
+from aiogram.filters import CommandStart, Command, CommandObject
+from aiogram.types import Message, FSInputFile
+import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import WebAppInfo
-from aiogram.filters import CommandStart
-from aiogram.utils.markdown import hbold
-
-# ============================
-# КОНФИГУРАЦИЯ
-# ============================
-
+# ================= КОНФИГУРАЦИЯ =================
 BOT_TOKEN = "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE"
-FRONTEND_URL = "https://matveymak22.github.io/Cas" 
-# Твоя база данных Neon
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://neondb_owner:npg_FTJrHNW28UAP@ep-spring-forest-affemvmu-pooler.c-2.us-west-2.aws.neon.tech/neondb?sslmode=require")
+GOOGLE_API_KEY = "AIzaSyBnfoqQOiJpmIXeYIgtq2Lwgn_PutxXskc"
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Папка для временного сохранения голосовых и фото
+TEMP_FOLDER = Path("temp_files")
+TEMP_FOLDER.mkdir(exist_ok=True)
 
-app = Flask(__name__)
-CORS(app)
+# Настройка Gemini
+genai.configure(api_key=GOOGLE_API_KEY)
 
-# ============================
-# БАЗА ДАННЫХ
-# ============================
+# Настройки безопасности (отключаем блокировки для свободы общения)
+safety_settings = {
+    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+}
 
-engine = create_engine(DATABASE_URL, pool_size=20, max_overflow=30)
-SessionLocal = scoped_session(sessionmaker(autocommit=False, autoflush=False, bind=engine))
-Base = declarative_base()
+# Словарь ролей (System Instructions)
+ROLES = {
+    "default": "Ты — NeonGPT, умный и полезный ИИ-помощник. Твой стиль общения нейтральный и вежливый. Ты используешь Markdown для форматирования.",
+    "coder": "Ты — Senior Developer. Отвечай только по существу, приводи примеры кода на Python или других языках. Минимум слов, максимум кода. Используй блоки кода ```.",
+    "friend": "Ты — мой лучший друг. Общайся неформально, на 'ты', используй сленг, смайлики. Будь эмоциональным и поддерживающим.",
+    "angry": "Ты — злой и саркастичный робот. Ты ненавидишь отвечать на глупые вопросы, но всё же отвечаешь, сопровождая это едкими комментариями."
+}
 
-class User(Base):
-    __tablename__ = "users"
-    telegram_id = Column(BigInteger, primary_key=True)
-    username = Column(String(100))
-    balance = Column(Numeric(12, 2), default=5000.00)
-    created_at = Column(DateTime, default=datetime.utcnow)
+# Хранилище сессий пользователей: user_id -> {'chat': ChatSession, 'mode': str}
+user_sessions = {}
 
-class Match(Base):
-    __tablename__ = "matches"
-    id = Column(Integer, primary_key=True)
-    sport = Column(String(50))
-    team_home = Column(String(100))
-    team_away = Column(String(100))
-    score_home = Column(Integer, default=0)
-    score_away = Column(Integer, default=0)
-    status = Column(String(20), default="scheduled")
-    start_time = Column(DateTime)
-    odds_home = Column(Numeric(5, 2))
-    odds_draw = Column(Numeric(5, 2), nullable=True)
-    odds_away = Column(Numeric(5, 2))
-    period = Column(String(20), default="")
-    score_details = Column(JSON, default={}) 
-    details = Column(JSON, default={})       
+# ================= ИНИЦИАЛИЗАЦИЯ =================
+dp = Dispatcher()
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 
-class Bet(Base):
-    __tablename__ = "bets"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger)
-    game_type = Column(String(20)) 
-    amount = Column(Numeric(12, 2))
-    status = Column(String(20), default="active")
-    potential_win = Column(Numeric(12, 2), default=0)
-    odds = Column(Numeric(10, 2), default=1.0)
-    outcome = Column(String(100))
-    match_info = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 
-class ActiveGame(Base):
-    __tablename__ = "active_games"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger)
-    game_type = Column(String(20))
-    bet_amount = Column(Numeric(12, 2))
-    game_data = Column(JSON) 
-    is_active = Column(Boolean, default=True)
-
-def init_db():
-    try:
-        # Раскомментируй следующую строку один раз, если нужно сбросить старые таблицы с ошибками
-        # Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
-        session = SessionLocal()
-        if session.query(Match).count() == 0:
-            logger.info("Генерация матчей...")
-            matches_data = [
-                ("football", "Real Madrid", "Barcelona", True),
-                ("football", "Man City", "Arsenal", True),
-                ("hockey", "SKA", "CSKA", True),
-                ("basketball", "Lakers", "Bulls", False),
-                ("tennis", "Djokovic", "Nadal", False)
-            ]
-            for sport, t1, t2, has_draw in matches_data:
-                details = {
-                    "total_val": 2.5,
-                    "total_over": round(random.uniform(1.6, 2.1), 2),
-                    "total_under": round(random.uniform(1.6, 2.1), 2),
-                    "handicap_val": -1.5,
-                    "handicap1": round(random.uniform(1.9, 3.5), 2),
-                    "handicap2": round(random.uniform(1.2, 1.5), 2)
-                }
-                match = Match(
-                    sport=sport, team_home=t1, team_away=t2,
-                    score_home=random.randint(0, 3), score_away=random.randint(0, 3),
-                    status=random.choice(["live", "scheduled"]),
-                    start_time=datetime.utcnow() + timedelta(minutes=random.randint(10, 300)),
-                    odds_home=round(random.uniform(1.4, 3.5), 2),
-                    odds_away=round(random.uniform(1.4, 3.5), 2),
-                    odds_draw=round(random.uniform(2.8, 4.2), 2) if has_draw else None,
-                    period="1st Half", details=details
-                )
-                session.add(match)
-            session.commit()
-        session.close()
-    except Exception as e:
-        logger.error(f"Ошибка БД: {e}")
-
-# Проверка Telegram данных
-def get_user_from_init_data(init_data_str):
-    if not init_data_str:
-        return None, None
-    try:
-        parsed = parse_qs(init_data_str)
-        if 'user' in parsed:
-            user_data = json.loads(parsed['user'][0])
-            return int(user_data.get('id')), user_data.get('username') or user_data.get('first_name') or "User"
-    except Exception as e:
-        logger.error(f"Error parsing initData: {e}")
-    return None, None
-
-# ============================
-# API ENDPOINTS
-# ============================
-
-@app.route('/api/init', methods=['POST'])
-def api_init():
-    data = request.json
-    init_data = data.get('initData')
-    
-    # СТРОГАЯ ПРОВЕРКА: Если нет initData - ошибка
-    if not init_data:
-        return jsonify({"success": False, "message": "Only via Telegram"}), 403
-
-    user_id, username = get_user_from_init_data(init_data)
-    if user_id is None:
-        return jsonify({"success": False, "message": "Invalid Auth"}), 403
-    
-    session = SessionLocal()
-    user = session.query(User).filter_by(telegram_id=user_id).first()
-    if not user:
-        user = User(telegram_id=user_id, username=username, balance=5000.00)
-        session.add(user)
-        session.commit()
-    
-    response = {
-        "success": True,
-        "user": {"id": user.telegram_id, "username": user.username, "balance": float(user.balance)}
-    }
-    session.close()
-    return jsonify(response)
-
-@app.route('/api/balance', methods=['GET'])
-def api_balance():
-    user_id = request.args.get('user_id')
-    session = SessionLocal()
-    user = session.query(User).filter_by(telegram_id=user_id).first()
-    bal = float(user.balance) if user else 0.0
-    session.close()
-    return jsonify({"balance": bal})
-
-@app.route('/api/matches', methods=['GET'])
-def api_matches():
-    sport = request.args.get('sport', 'all')
-    session = SessionLocal()
-    query = session.query(Match)
-    if sport != 'all':
-        query = query.filter_by(sport=sport)
-    matches = query.all()
-    result = []
-    for m in matches:
-        result.append({
-            "id": m.id, "sport": m.sport,
-            "team_home": m.team_home, "team_away": m.team_away,
-            "score_home": m.score_home, "score_away": m.score_away,
-            "status": m.status, "start_time": m.start_time.isoformat(),
-            "odds_home": float(m.odds_home), "odds_away": float(m.odds_away),
-            "odds_draw": float(m.odds_draw) if m.odds_draw else None,
-            "period": m.period, "details": m.details 
-        })
-    session.close()
-    return jsonify({"matches": result})
-
-@app.route('/api/bet', methods=['POST'])
-def api_place_bet():
-    data = request.json
-    user_id = data.get('user_id')
-    # ВАЖНО: Конвертация в Decimal
-    amount_dec = Decimal(str(data.get('amount')))
-    
-    session = SessionLocal()
-    user = session.query(User).filter_by(telegram_id=user_id).first()
-    
-    if not user or user.balance < amount_dec:
-        session.close()
-        return jsonify({"success": False, "message": "Недостаточно средств"})
-    
-    user.balance -= amount_dec
-    
-    match = session.query(Match).get(data.get('match_id'))
-    match_info = {"teams": f"{match.team_home} vs {match.team_away}"} if match else {}
-    
-    odds_val = Decimal(str(data.get('odds', 1.0)))
-    potential = amount_dec * odds_val
-    
-    bet = Bet(
-        user_id=user_id, game_type="sport", amount=amount_dec,
-        status="active", odds=odds_val, outcome=data.get('outcome'),
-        match_info=match_info, potential_win=potential
+def get_model(mode="default"):
+    """Создает объект модели с нужной системной инструкцией"""
+    system_instruction = ROLES.get(mode, ROLES["default"])
+    return genai.GenerativeModel(
+        model_name="models/gemini-2.5-flash", # Или gemini-2.0-flash-exp если доступна
+        safety_settings=safety_settings,
+        system_instruction=system_instruction
     )
-    session.add(bet)
-    session.commit()
-    
-    new_bal = float(user.balance)
-    session.close()
-    return jsonify({"success": True, "new_balance": new_bal, "potential_win": float(potential)})
 
-# --- ИГРЫ ---
+def get_chat_session(user_id, mode="default", force_new=False):
+    """Управляет сессией чата (памятью)"""
+    if user_id not in user_sessions or force_new:
+        model = get_model(mode)
+        chat = model.start_chat(history=[])
+        user_sessions[user_id] = {'chat': chat, 'mode': mode}
+    return user_sessions[user_id]['chat']
 
-@app.route('/api/game', methods=['POST'])
-def api_game_start():
-    data = request.json
-    game_type = data.get('game_type')
-    user_id = data.get('user_id')
-    amount_dec = Decimal(str(data.get('amount')))
-    
-    session = SessionLocal()
-    user = session.query(User).filter_by(telegram_id=user_id).first()
-    
-    if not user or user.balance < amount_dec:
-        session.close()
-        return jsonify({"success": False, "message": "Недостаточно средств"})
-    
-    user.balance -= amount_dec
-    
-    response = {}
-    
-    if game_type == 'dice':
-        dice_res = random.randint(1, 6)
-        bet_type = data.get('dice_bet')
-        is_win = (dice_res % 2 == 0 and bet_type == 'even') or (dice_res % 2 != 0 and bet_type == 'odd')
-        win_amt = Decimal(0)
-        
-        if is_win:
-            win_amt = amount_dec * Decimal(2.0)
-            user.balance += win_amt
-            
-        bet = Bet(user_id=user_id, game_type='dice', amount=amount_dec, status='won' if is_win else 'lost', odds=2.0, outcome=f"{bet_type} ({dice_res})")
-        session.add(bet)
-        response = {
-            "success": True, "dice_result": dice_res,
-            "win": is_win, "win_amount": float(win_amt),
-            "new_balance": float(user.balance)
-        }
-        
-    elif game_type == 'mines':
-        mines_count = int(data.get('mines_count', 3))
-        field = [0] * 25
-        indices = random.sample(range(25), mines_count)
-        for i in indices: field[i] = 1
-            
-        # revealed_count = 0 (важно для логики 80%)
-        game_data = {"field": field, "mines_count": mines_count, "revealed_count": 0}
-        
-        active_game = ActiveGame(
-            user_id=user_id, game_type='mines', bet_amount=amount_dec,
-            game_data=game_data
-        )
-        session.add(active_game)
-        session.commit()
-        response = {
-            "success": True, "bet_id": active_game.id,
-            "field": field, "new_balance": float(user.balance)
-        }
-    
-    session.commit()
-    session.close()
-    return jsonify(response)
+async def download_file(file_id, file_name):
+    """Скачивает файл из Telegram"""
+    file = await bot.get_file(file_id)
+    file_path = TEMP_FOLDER / file_name
+    await bot.download_file(file.file_path, file_path)
+    return file_path
 
-@app.route('/api/mines/update', methods=['POST'])
-def api_mines_update():
-    # Клиент сообщает, что открыл клетку
-    data = request.json
-    game_id = data.get('crash_id')
-    
-    session = SessionLocal()
-    game = session.query(ActiveGame).get(game_id)
-    if game and game.is_active:
-        current_data = dict(game.game_data)
-        current_data['revealed_count'] = current_data.get('revealed_count', 0) + 1
-        game.game_data = current_data
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(game, "game_data")
-        session.commit()
-    session.close()
-    return jsonify({"success": True})
+# ================= ХЕНДЛЕРЫ (ОБРАБОТЧИКИ) =================
 
-@app.route('/api/mines/cashout', methods=['POST'])
-def api_mines_cashout():
-    data = request.json
-    game_id = data.get('crash_id')
-    user_id = data.get('user_id')
-    
-    session = SessionLocal()
-    game = session.query(ActiveGame).get(game_id)
-    
-    if not game or not game.is_active:
-        session.close()
-        return jsonify({"success": False, "message": "Игра не найдена"})
-    
-    revealed = game.game_data.get('revealed_count', 0)
-    amount = game.bet_amount
-    
-    # ЛОГИКА 80%: Если ходов не было - возвращаем 80%
-    if revealed == 0:
-        win_amount = amount * Decimal('0.8')
-        multiplier = 0.8
-        status = 'refund'
-    else:
-        # Расчет выигрыша (упрощенный, но честный)
-        mines = game.game_data['mines_count']
-        multiplier = Decimal(1.0)
-        # Симулируем расчет коэффициента за N ходов
-        for i in range(revealed):
-            safe_remaining = 25 - mines - i
-            total_remaining = 25 - i
-            if safe_remaining > 0:
-                multiplier *= Decimal(total_remaining) / Decimal(safe_remaining)
-            
-        multiplier = multiplier * Decimal('0.95') # Маржа 5%
-        win_amount = amount * multiplier
-        status = 'won'
-
-    user = session.query(User).filter_by(telegram_id=user_id).first()
-    user.balance += win_amount
-    game.is_active = False
-    
-    bet = Bet(
-        user_id=user_id, game_type='mines', amount=amount, 
-        status=status, odds=multiplier, outcome=f"mines_out_{revealed}", 
-        potential_win=win_amount
+@dp.message(CommandStart())
+async def cmd_start(message: Message):
+    user_name = message.from_user.full_name
+    await message.answer(
+        f"🟢 **NeonGPT Activated**\n\n"
+        f"Привет, {user_name}! Я готов к работе.\n"
+        f"Мои возможности:\n"
+        f"🗣 Обычный диалог и код\n"
+        f"📸 Понимаю фото\n"
+        f"🎙 Слышу голосовые\n\n"
+        f"⚙️ **Команды:**\n"
+        f"`/mode coder` - Режим программиста\n"
+        f"`/mode friend` - Режим друга\n"
+        f"`/mode default` - Обычный режим\n"
+        f"`/reset` - Сбросить память"
     )
-    session.add(bet)
-    session.commit()
-    
-    new_bal = float(user.balance)
-    session.close()
-    return jsonify({"success": True, "new_balance": new_bal, "win_amount": float(win_amount)})
 
-@app.route('/api/crash/start', methods=['POST'])
-def api_crash_start():
-    data = request.json
-    user_id = data.get('user_id')
-    amount_dec = Decimal(str(data.get('amount')))
-    
-    session = SessionLocal()
-    user = session.query(User).filter_by(telegram_id=user_id).first()
-    
-    if not user or user.balance < amount_dec:
-        session.close()
-        return jsonify({"success": False, "message": "Недостаточно средств"})
-    
-    user.balance -= amount_dec
-    
-    crash_point = round(random.uniform(1.0, 5.0), 2)
-    if random.random() < 0.1: crash_point = 1.0
-    
-    game = ActiveGame(user_id=user_id, game_type='crash', bet_amount=amount_dec, game_data={"crash_point": crash_point})
-    session.add(game)
-    session.commit()
-    
-    response = {
-        "success": True, "game_id": game.id,
-        "crash_point": float(crash_point), "new_balance": float(user.balance)
-    }
-    session.close()
-    return jsonify(response)
+@dp.message(Command("reset", "clear"))
+async def cmd_reset(message: Message):
+    user_id = message.from_user.id
+    current_mode = user_sessions.get(user_id, {}).get('mode', 'default')
+    get_chat_session(user_id, mode=current_mode, force_new=True)
+    await message.answer("🔄 **Память очищена!** Начали с чистого листа.")
 
-@app.route('/api/crash/cashout', methods=['POST'])
-def api_crash_cashout():
-    data = request.json
-    game_id = data.get('crash_id')
-    user_id = data.get('user_id')
+@dp.message(Command("mode"))
+async def cmd_mode(message: Message, command: CommandObject):
+    """Переключение ролей"""
+    mode = command.args
+    if not mode or mode not in ROLES:
+        await message.answer(f"Доступные режимы: {', '.join(ROLES.keys())}")
+        return
     
-    session = SessionLocal()
-    game = session.query(ActiveGame).get(game_id)
-    
-    if not game or not game.is_active:
-        session.close()
-        return jsonify({"success": False})
-    
-    crash_point = float(game.game_data['crash_point'])
-    # Игрок выводит чуть раньше, чем крашнется
-    user_mult_float = crash_point - 0.05
-    if user_mult_float < 1.01: user_mult_float = 1.01
-    user_mult_dec = Decimal(str(round(user_mult_float, 2)))
-    
-    win_amount = game.bet_amount * user_mult_dec
-    
-    user = session.query(User).filter_by(telegram_id=user_id).first()
-    user.balance += win_amount
-    game.is_active = False
-    
-    bet = Bet(
-        user_id=user_id, game_type='crash', amount=game.bet_amount, 
-        status='won', odds=user_mult_dec, outcome="cashout", 
-        potential_win=win_amount
-    )
-    session.add(bet)
-    session.commit()
-    
-    new_bal = float(user.balance)
-    session.close()
-    return jsonify({"success": True, "new_balance": new_bal, "win_amount": float(win_amount), "multiplier": float(user_mult_dec)})
+    user_id = message.from_user.id
+    # При смене режима всегда сбрасываем историю, чтобы применить новую системную инструкцию
+    get_chat_session(user_id, mode=mode, force_new=True)
+    await message.answer(f"🎭 Режим переключен на: **{mode}**")
 
-@app.route('/api/history', methods=['GET'])
-def api_history():
-    user_id = request.args.get('user_id')
-    session = SessionLocal()
-    bets = session.query(Bet).filter_by(user_id=user_id).order_by(Bet.created_at.desc()).limit(20).all()
-    history = []
-    for b in bets:
-        history.append({
-            "game_type": b.game_type, "amount": float(b.amount),
-            "status": b.status, "odds": float(b.odds),
-            "outcome": b.outcome, "created_at": b.created_at.isoformat(),
-            "match_info": b.match_info
-        })
-    session.close()
-    return jsonify({"history": history})
-
-async def start_bot_async():
-    bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher()
-    @dp.message(CommandStart())
-    async def cmd_start(message: types.Message):
-        kb = types.InlineKeyboardMarkup(inline_keyboard=[[
-            types.InlineKeyboardButton(text="🎰 Играть в Royal Bet", web_app=WebAppInfo(url=FRONTEND_URL))
-        ]])
-        await message.answer(f"Привет, {hbold(message.from_user.first_name)}! Твой баланс ждет.", reply_markup=kb)
+@dp.message(F.photo)
+async def photo_handler(message: Message):
+    """Обработка изображений (Зрение)"""
+    processing_msg = await message.answer("👀 **Смотрю на фото...**")
+    
     try:
-        await dp.start_polling(bot, handle_signals=False)
+        # Скачиваем фото (берем самое большое)
+        photo = message.photo[-1]
+        file_path = await download_file(photo.file_id, f"{message.from_user.id}.jpg")
+        
+        # Загружаем в Gemini File API
+        uploaded_file = genai.upload_file(path=file_path)
+        
+        # Получаем текст от пользователя (если есть подпись) или ставим дефолтный
+        prompt = message.caption if message.caption else "Опиши подробно, что изображено на этой картинке."
+        
+        # Получаем сессию и отправляем
+        chat = get_chat_session(message.from_user.id)
+        response = await chat.send_message_async([prompt, uploaded_file])
+        
+        await processing_msg.edit_text(response.text)
+        
+        # Удаляем временный файл
+        os.remove(file_path)
+        
     except Exception as e:
-        logger.error(f"Bot error: {e}")
+        await processing_msg.edit_text(f"🔴 Ошибка зрения: {e}")
 
-def run_bot_in_thread():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_bot_async())
-    loop.close()
+@dp.message(F.voice)
+async def voice_handler(message: Message):
+    """Обработка голосовых сообщений (Слух)"""
+    processing_msg = await message.answer("👂 **Слушаю...**")
+    
+    try:
+        # Скачиваем голосовое (обычно это .ogg)
+        file_path = await download_file(message.voice.file_id, f"{message.from_user.id}.ogg")
+        
+        # Загружаем аудио в Gemini
+        uploaded_file = genai.upload_file(path=file_path)
+        
+        # Gemini нужно время на обработку аудио (обычно пару секунд)
+        import time
+        while uploaded_file.state.name == "PROCESSING":
+            time.sleep(1)
+            uploaded_file = genai.get_file(uploaded_file.name)
+            
+        chat = get_chat_session(message.from_user.id)
+        # Просим модель послушать и ответить
+        response = await chat.send_message_async(["Послушай это аудиосообщение и ответь на него (или выполни просьбу из него).", uploaded_file])
+        
+        await processing_msg.edit_text(response.text)
+        
+        # Чистим файлы
+        os.remove(file_path)
+        
+    except Exception as e:
+        await processing_msg.edit_text(f"🔴 Ошибка слуха: {e}")
 
-if __name__ == '__main__':
-    init_db()
-    bot_thread = threading.Thread(target=run_bot_in_thread, daemon=True)
-    bot_thread.start()
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+@dp.message(F.text)
+async def text_handler(message: Message):
+    """Обычный текстовый диалог"""
+    user_id = message.from_user.id
+    user_text = message.text
+    
+    # Игнорируем команды (они обрабатываются отдельно)
+    if user_text.startswith('/'):
+        return
+
+    # Сообщение-заглушка
+    bot_msg = await message.answer("🟢")
+    
+    try:
+        chat = get_chat_session(user_id)
+        response = await chat.send_message_async(user_text)
+        
+        # Форматирование кода делает сам Gemini через Markdown, Telegram его понимает
+        # Если ответ очень длинный, разбиваем (простая реализация)
+        if len(response.text) > 4000:
+            await bot_msg.delete()
+            for x in range(0, len(response.text), 4000):
+                await message.answer(response.text[x:x+4000])
+        else:
+            await bot_msg.edit_text(response.text)
+            
+    except Exception as e:
+        await bot_msg.edit_text(f"🔴 Ошибка: {e}\nПопробуй /reset")
+
+# ================= ЗАПУСК =================
+async def main():
+    print("🚀 NeonGPT запущен! Нажми Ctrl+C для выхода.")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Бот выключен.")
