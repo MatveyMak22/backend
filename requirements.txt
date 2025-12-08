@@ -1,5 +1,4 @@
-flask
-flask-cors
-psycopg2-binary
-sqlalchemy
-aiogram
+aiogram>=3.0.0
+google-generativeai
+python-dotenv
+pillow
