@@ -76,7 +76,7 @@ bot = Bot(
 def get_model(mode="default"):
     system_instruction = ROLES.get(mode, ROLES["default"])
     return genai.GenerativeModel(
-        model_name="gemini-1.5-flash", # Быстрая модель с большими лимитами
+        model_name="gemini-2.0-flash-exp", # Быстрая модель с большими лимитами
         safety_settings=safety_settings,
         system_instruction=system_instruction
     )
@@ -228,4 +228,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Бот выключен.")
+
 
