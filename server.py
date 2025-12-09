@@ -18,7 +18,7 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # ================= КОНФИГУРАЦИЯ =================
 BOT_TOKEN = "8055430766:AAFOiwd06FIxkUXWnszcTY3YOgWUz4-NEYY"
-GOOGLE_API_KEY = "AIzaSyBnfoqQOiJpmIXeYIgtq2Lwgn_PutxXskc"
+GOOGLE_API_KEY = "AIzaSyCiS3Udru-gKFhVMxWMtev1vIiWw7OFEtM"
 
 # Папка для временного сохранения голосовых и фото
 TEMP_FOLDER = Path("temp_files")
@@ -227,4 +227,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Бот выключен.")
+
 
