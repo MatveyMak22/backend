@@ -3,21 +3,22 @@ import logging
 import os
 import sys
 from pathlib import Path
-from threading import Thread # Для запуска сервера в фоне
+from threading import Thread # Для запуска сервера-обманки
 
-# Добавляем Flask для обмана Render
+# Добавляем Flask для Render
 from flask import Flask
 
-from aiogram import Bot, Dispatcher, F, html
+from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command, CommandObject
-from aiogram.types import Message
+from aiogram.types import Message, BotCommand # <--- Добавили BotCommand для меню
+
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # ================= КОНФИГУРАЦИЯ =================
-# Вставьте свои ключи
+# Вставь свои ключи сюда
 BOT_TOKEN = "8055430766:AAEfGZOVbLhOjASjlVUmOMJuc89SjT_IkmE"
 GOOGLE_API_KEY = "AIzaSyBnfoqQOiJpmIXeYIgtq2Lwgn_PutxXskc"
 
@@ -28,7 +29,7 @@ TEMP_FOLDER.mkdir(exist_ok=True)
 # Настройка Gemini
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# Настройки безопасности
+# Настройки безопасности (отключаем цензуру)
 safety_settings = {
     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
     HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
@@ -36,6 +37,7 @@ safety_settings = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
 
+# Роли бота
 ROLES = {
     "default": "Ты — NeonGPT, умный и полезный ИИ-помощник. Твой стиль общения нейтральный и вежливый. Ты используешь Markdown для форматирования.",
     "coder": "Ты — Senior Developer. Отвечай только по существу, приводи примеры кода на Python или других языках. Минимум слов, максимум кода. Используй блоки кода ```.",
@@ -45,15 +47,15 @@ ROLES = {
 
 user_sessions = {}
 
-# ================= FLASK СЕРВЕР (ОБМАНКА) =================
+# ================= FLASK СЕРВЕР (ОБМАНКА ДЛЯ RENDER) =================
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "I'm alive! Bot is running."
+    return "I'm alive! NeonGPT is running."
 
 def run_http_server():
-    # Render выдает порт через переменную окружения PORT, по умолчанию 8080
+    # Render сам передает порт, если нет - используем 8080
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -63,8 +65,7 @@ def keep_alive():
 
 # ================= ИНИЦИАЛИЗАЦИЯ БОТА =================
 dp = Dispatcher()
-
-# На Render прокси НЕ НУЖНЫ, подключаемся напрямую
+# Прокси больше нет, просто чистый бот
 bot = Bot(
     token=BOT_TOKEN, 
     default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
@@ -75,7 +76,7 @@ bot = Bot(
 def get_model(mode="default"):
     system_instruction = ROLES.get(mode, ROLES["default"])
     return genai.GenerativeModel(
-        model_name="gemini-1.5-flash", # Используем Flash (бесплатно и много запросов)
+        model_name="gemini-1.5-flash", # Быстрая модель с большими лимитами
         safety_settings=safety_settings,
         system_instruction=system_instruction
     )
@@ -93,15 +94,14 @@ async def download_file(file_id, file_name):
     await bot.download_file(file.file_path, file_path)
     return file_path
 
-# ================= ХЕНДЛЕРЫ =================
+# ================= ХЕНДЛЕРЫ КОМАНД =================
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    user_name = message.from_user.full_name
     await message.answer(
-        f"🟢 **NeonGPT Activated**\n\n"
-        f"Привет, {user_name}! Я переехал на быстрый сервер Render 🚀.\n"
-        f"⚙️ **Команды:** /mode coder, /mode friend, /reset"
+        f"👋 **Привет! Я NeonGPT.**\n\n"
+        f"Я готов общаться, писать код, смотреть картинки и слушать голосовые.\n\n"
+        f"👇 **Нажми кнопку Меню слева внизу**, чтобы выбрать режим!"
     )
 
 @dp.message(Command("reset", "clear"))
@@ -109,18 +109,32 @@ async def cmd_reset(message: Message):
     user_id = message.from_user.id
     current_mode = user_sessions.get(user_id, {}).get('mode', 'default')
     get_chat_session(user_id, mode=current_mode, force_new=True)
-    await message.answer("🔄 **Память очищена!**")
+    await message.answer("🧹 **Память очищена!** Я забыл наш предыдущий разговор.")
 
-@dp.message(Command("mode"))
-async def cmd_mode(message: Message, command: CommandObject):
-    mode = command.args
-    if not mode or mode not in ROLES:
-        await message.answer(f"Доступные режимы: {', '.join(ROLES.keys())}")
-        return
-    
+# --- Удобные команды для смены режимов ---
+
+@dp.message(Command("coder"))
+async def mode_coder(message: Message):
+    await set_mode(message, "coder")
+
+@dp.message(Command("friend"))
+async def mode_friend(message: Message):
+    await set_mode(message, "friend")
+
+@dp.message(Command("angry"))
+async def mode_angry(message: Message):
+    await set_mode(message, "angry")
+
+@dp.message(Command("default"))
+async def mode_default(message: Message):
+    await set_mode(message, "default")
+
+async def set_mode(message: Message, mode: str):
     user_id = message.from_user.id
     get_chat_session(user_id, mode=mode, force_new=True)
-    await message.answer(f"🎭 Режим: **{mode}**")
+    await message.answer(f"🎭 Режим переключен: **{mode.upper()}**\n{ROLES[mode][:50]}...")
+
+# ================= ОБРАБОТКА КОНТЕНТА =================
 
 @dp.message(F.photo)
 async def photo_handler(message: Message):
@@ -131,12 +145,13 @@ async def photo_handler(message: Message):
         
         uploaded_file = genai.upload_file(path=file_path)
         
+        # Ждем обработки файла
         import time
         while uploaded_file.state.name == "PROCESSING":
             time.sleep(1)
             uploaded_file = genai.get_file(uploaded_file.name)
 
-        prompt = message.caption if message.caption else "Что здесь?"
+        prompt = message.caption if message.caption else "Опиши подробно, что на фото."
         chat = get_chat_session(message.from_user.id)
         response = await chat.send_message_async([prompt, uploaded_file])
         
@@ -160,7 +175,7 @@ async def voice_handler(message: Message):
             uploaded_file = genai.get_file(uploaded_file.name)
             
         chat = get_chat_session(message.from_user.id)
-        response = await chat.send_message_async(["Послушай и ответь.", uploaded_file])
+        response = await chat.send_message_async(["Послушай это и ответь.", uploaded_file])
         
         await processing_msg.edit_text(response.text)
         if os.path.exists(file_path):
@@ -171,14 +186,15 @@ async def voice_handler(message: Message):
 @dp.message(F.text)
 async def text_handler(message: Message):
     user_id = message.from_user.id
-    if message.text.startswith('/'): return
+    if message.text.startswith('/'): return # Игнорируем команды
     
-    bot_msg = await message.answer("⏳") # Смайлик часов
+    bot_msg = await message.answer("⏳")
     try:
         chat = get_chat_session(user_id)
         response = await chat.send_message_async(message.text)
         
         if len(response.text) > 4000:
+            # Если ответ слишком длинный для одного сообщения
             await bot_msg.delete()
             for x in range(0, len(response.text), 4000):
                 await message.answer(response.text[x:x+4000])
@@ -187,11 +203,23 @@ async def text_handler(message: Message):
     except Exception as e:
         await bot_msg.edit_text(f"🔴 Ошибка: {e}")
 
-# ================= ЗАПУСК =================
+# ================= ГЛАВНАЯ ФУНКЦИЯ =================
 async def main():
-    # Запускаем веб-сервер в отдельном потоке
+    # 1. Запускаем сервер (чтобы Render не спал)
     keep_alive()
-    print("🚀 NeonGPT запускается на Render...")
+    
+    # 2. Настраиваем кнопку МЕНЮ в Telegram
+    commands = [
+        BotCommand(command="start", description="🚀 Перезапуск"),
+        BotCommand(command="reset", description="🧹 Забыть диалог"),
+        BotCommand(command="coder", description="👨‍💻 Режим: Программист"),
+        BotCommand(command="friend", description="🍺 Режим: Друг"),
+        BotCommand(command="angry", description="🤬 Режим: Токсик"),
+        BotCommand(command="default", description="🤖 Режим: Обычный"),
+    ]
+    await bot.set_my_commands(commands)
+    
+    print("🚀 NeonGPT запущен на Render! Меню обновлено.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
